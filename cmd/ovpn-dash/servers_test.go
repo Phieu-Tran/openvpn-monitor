@@ -302,3 +302,89 @@ func TestNoiseFlows(t *testing.T) {
 		t.Errorf("after the skip list: %v", got)
 	}
 }
+
+// "UNDEF": a connection whose TLS handshake is not done. One that never finishes (a scanner,
+// no valid certificate) is logged apart, in probes; a user caught in that second gets their
+// name on the next poll, with their access rows, and leaves probes.
+func TestUndef(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, dir, 90*24*time.Hour, 0)
+	// as 0.1.8 left it: u1 (cid 1) stored as UNDEF without a VPN IP, an old scanner session,
+	// and u1's access row matched to UNDEF
+	tx, _ := s.db.Begin()
+	st, _ := tx.Prepare(upsertSQL)
+	c := resp(true, 1).Instances[0].Sessions[0]
+	upsert(st, record{Server: "a", CN: unauthenticated, Profile: "all-dev", Proto: "udp", Instance: "a/openvpn-udp-all-dev-v2", CID: 1,
+		RealIP: c.RealIP, Start: c.ConnectedSince, End: at(0), Open: true})
+	upsert(st, record{Server: "a", CN: unauthenticated, Profile: "all-dev", Proto: "udp", Instance: "a/openvpn-udp-all-dev-v2", CID: 99,
+		RealIP: "198.51.100.9", Start: at(-30), End: at(-29), Country: "US"})
+	tx.Commit()
+	m := at(0).Unix() / 60 * 60
+	s.addFlows("a", []agentFlow{{T: m, Src: "10.8.0.2", Dst: "192.0.2.10", Port: 27017, Proto: "tcp", First: at(0).Unix() + 5, Last: at(0).Unix() + 5, N: 1}}, nil, at(0))
+	s.db.Exec("UPDATE flows SET cn = 'UNDEF'")
+
+	// now: u1 has its name; another connection (cid 2) is still in its handshake
+	scanning := true
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api/v1/flows" {
+			json.NewEncoder(w).Encode(map[string]any{"enabled": true, "flows": []agentFlow{}})
+			return
+		}
+		r := resp(true, 1, 2)
+		if scanning {
+			r.Instances[0].Sessions[1].CN, r.Instances[0].Sessions[1].VPNIP = unauthenticated, ""
+		}
+		json.NewEncoder(w).Encode(r)
+	}))
+	defer agent.Close()
+	agents, _ := parseAgents("a=" + agent.URL)
+	p := &poller{servers: agents, client: agent.Client(), store: s, geo: newGeo("", "")}
+	p.poll()
+	w := httptest.NewRecorder()
+	p.serve(w, httptest.NewRequest("GET", "/api/sessions", nil))
+	if !strings.Contains(w.Body.String(), `"cn":"UNDEF"`) {
+		t.Errorf("live hides the handshake in progress: %s", w.Body)
+	}
+	cns := map[string]record{}
+	for _, x := range list(t, s, filter{from: at(-60), to: time.Now().Add(time.Hour), limit: 100}) {
+		cns[x.CN] = x
+	}
+	if u1, ok := cns["u1"]; !ok || u1.VPNIP != "10.8.0.2" || len(cns) != 2 { // u1, and the old scanner until the next prune
+		t.Errorf("sessions: %+v", cns)
+	}
+	var cn string
+	s.db.QueryRow("SELECT cn FROM flows").Scan(&cn)
+	if cn != "u1" {
+		t.Errorf("access row user = %q", cn)
+	}
+
+	// prune moves the old scanner over; the API lists both attempts
+	s.prune(time.Now())
+	var n int
+	s.db.QueryRow("SELECT count(*) FROM sessions WHERE cn = 'UNDEF'").Scan(&n)
+	mux := http.NewServeMux()
+	(&api{store: s}).routes(mux)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/probes?from="+at(-60).Format(time.RFC3339), nil))
+	var got struct {
+		Probes  []probe
+		Summary probeSummary
+	}
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if n != 0 || len(got.Probes) != 2 || got.Summary.IPs != 2 || len(got.Summary.Countries) != 2 {
+		t.Fatalf("UNDEF sessions %d; probes %s", n, w.Body)
+	}
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/probes.csv?q=198.51", nil))
+	if body := w.Body.String(); !strings.Contains(body, ",198.51.100.9,0,US,a,all-dev,udp\r\n") || strings.Count(body, "\n") != 2 {
+		t.Errorf("csv: %q", body)
+	}
+
+	// cid 2 finishes its handshake: it was a user, not a probe
+	scanning = false
+	p.poll()
+	s.db.QueryRow("SELECT count(*) FROM probes").Scan(&n)
+	if n != 1 {
+		t.Errorf("probes after cid 2 authenticated: %d", n)
+	}
+}

@@ -2,7 +2,7 @@ import { Card, Skeleton, Tooltip } from "@heroui/react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Heatmap, Legend, Sparkline, TimeChart, seriesColor } from "./charts";
-import { F, M, H, PRESETS, appName, bytes, countryName, duration, osName, rangeKey, rangeParams, rate, relative, sum, useJSON, usePref, addr } from "./lib";
+import { F, M, H, PRESETS, UNDEF, appName, bytes, countryName, duration, osName, rangeKey, rangeParams, rate, relative, sum, useJSON, usePref, addr } from "./lib";
 import type { Heat, Live, LiveRow, Preset, Series } from "./lib";
 import { Badge, ColumnMenu, CountryCards, CountryTag, DataTable, DeviceTag, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
@@ -57,7 +57,11 @@ export function Online({ live, error, alertRate, profiles, server, multi, onSess
   // a server keeps its colour: its position in the agent list
   const serverNames = live?.servers.map((s) => s.name) ?? [];
   const groups = (live?.servers ?? []).filter((s) => !server || s.name === server);
-  const insts = (live?.instances ?? []).filter((i) => !server || i.server === server);
+  const shown = (live?.instances ?? []).filter((i) => !server || i.server === server);
+  // UNDEF: TLS handshake not done. Not counted anywhere; listed apart, in red.
+  const pending: LiveRow[] = shown.flatMap((i) => i.sessions.filter((s) => s.cn === UNDEF)
+    .map((s) => ({ ...s, server: i.server, instance: i.name, proto: i.proto, profile: i.profile })));
+  const insts = shown.map((i) => ({ ...i, sessions: i.sessions.filter((s) => s.cn !== UNDEF) }));
   const stale = (i: { server: string }) => live?.servers.some((s) => s.name === i.server && !s.ok);
   const all: LiveRow[] = insts.flatMap((i) => i.sessions.map((s) => ({ ...s, server: i.server, instance: i.name, proto: i.proto, profile: i.profile })));
   const alerting = (s: LiveRow) => alertRate > 0 && s.rate_rx + s.rate_tx > alertRate;
@@ -218,6 +222,27 @@ export function Online({ live, error, alertRate, profiles, server, multi, onSess
           </figure>
         </div>
       </Panel>
+
+      {pending.length > 0 && (
+        <Card className="gap-2 ring-1 ring-danger">
+          <div className="flex flex-wrap items-center gap-2">
+            <Icon name="shield" className="size-5 text-danger" />
+            <b className="text-danger">Not authenticated now: {pending.length}</b>
+            <span className="text-xs text-muted">TLS handshake not done: someone connecting this second, or a scan / a client without a valid certificate.</span>
+            <a href="#probes" className="ml-auto text-sm text-danger underline underline-offset-2">All attempts</a>
+          </div>
+          <ul className="text-sm">
+            {pending.map((s) => (
+              <li key={`${s.server}|${s.instance}|${s.cid}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border py-1.5">
+                <span className="flex items-center"><CountryTag cc={s.country} /><span className="mono">{addr(s.real_ip, s.real_port)}</span></span>
+                {multi && <ServerTag name={s.server} />}
+                <ProfileTag name={s.profile} profiles={profiles} /><span className="text-xs text-muted">{s.proto.toUpperCase()}</span>
+                <span className="ml-auto text-xs text-muted" title={F.abs.format(Date.parse(s.connected_since))}>since {relative(Date.parse(s.connected_since))}</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {live && all.length > 0 && (
         <Panel title="Connecting from" actions={<span className="text-xs text-muted">country of the real IP, online now{country && " · a card filters the sessions below"}</span>}>

@@ -1,7 +1,7 @@
 import { parseDate, today } from "@internationalized/date";
 import { Button, Card, DateField, DateRangePicker, Pagination, RangeCalendar } from "@heroui/react";
 import { useEffect, useState } from "react";
-import { F, PRESETS, TZ, addr, appName, bytes, countryName, duration, platName, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
+import { F, PRESETS, TZ, UNDEF, addr, appName, bytes, countryName, duration, platName, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
 import type { DeviceUse, Facets, History, Preset, Range, SessionRecord, UserRow, Users } from "./lib";
 import { Badge, CountryCards, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
@@ -154,6 +154,7 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
     { id: "cn", label: "CN", cell: (x) => (
       <span className="flex items-center gap-1.5">
         <span className="font-semibold">{x.cn}</span>
+        {x.cn === UNDEF && <Badge tone="danger" title="Stored before the name was known (TLS handshake not done)">not authenticated</Badge>}
         {alerting(x) && <Badge tone="danger" title={`peak rate ${rate(x.peak_rate!)} > ${rate(alertRate)}`}>⚠ peak</Badge>}
       </span>) },
     ...(multi ? [{ id: "server", label: "Server", cell: (x: SessionRecord) => <ServerTag name={x.server} /> }] : []),
@@ -199,6 +200,7 @@ export function UserList({ filters, setFilters, facets, alertRate, onUser, profi
     { id: "cn", label: "CN", cell: (u) => (
       <span className="flex items-center gap-1.5">
         <span className="font-semibold">{u.cn}</span>
+        {u.cn === UNDEF && <Badge tone="danger" title="Stored before the name was known (TLS handshake not done)">not authenticated</Badge>}
         {alerting(u) && <Badge tone="danger" title={`peak rate ${rate(u.peak_rate)} > ${rate(alertRate)}`}>⚠ peak</Badge>}
       </span>) },
     ...(multi ? [{ id: "servers", label: "Servers", cell: (u: UserRow) => <span className="flex gap-1">{u.servers.map((s) => <ServerTag key={s} name={s} />)}</span> }] : []),

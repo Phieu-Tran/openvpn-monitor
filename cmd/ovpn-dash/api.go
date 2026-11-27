@@ -107,6 +107,8 @@ func (a *api) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/series", a.series)
 	mux.HandleFunc("GET /api/heatmap", a.heatmap)
 	mux.HandleFunc("GET /api/facets", a.facets)
+	mux.HandleFunc("GET /api/probes", a.probes)
+	mux.HandleFunc("GET /api/probes.csv", a.probesCSV)
 	mux.HandleFunc("GET /api/access", a.access)
 	mux.HandleFunc("GET /api/access.csv", a.accessCSV)
 }
@@ -132,6 +134,37 @@ func (a *api) access(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"from": f.from, "to": f.to, "access": list, "summary": sum, "destinations": dests})
+}
+
+func (a *api) probes(w http.ResponseWriter, r *http.Request) {
+	f, ok := a.filter(w, r)
+	if !ok {
+		return
+	}
+	list := []probe{}
+	err := a.store.eachProbe(r.Context(), f, func(p probe) error { list = append(list, p); return nil })
+	if !check(w, r, err) {
+		return
+	}
+	sum, err := a.store.probeSummary(r.Context(), f)
+	if check(w, r, err) {
+		writeJSON(w, map[string]any{"from": f.from, "to": f.to, "probes": list, "summary": sum})
+	}
+}
+
+func (a *api) probesCSV(w http.ResponseWriter, r *http.Request) {
+	f, ok := a.filter(w, r)
+	if !ok {
+		return
+	}
+	f.limit, f.offset = -1, 0
+	exportCSV(w, r, fileName("not-authenticated", f), []string{"start", "last_seen", "duration_s", "real_ip", "real_port", "country", "server", "profile", "proto"},
+		func(write func(...string) error) error {
+			return a.store.eachProbe(r.Context(), f, func(p probe) error {
+				return write(csvTime(p.Start), csvTime(p.End), strconv.FormatInt(int64(p.End.Sub(p.Start).Seconds()), 10), p.RealIP,
+					strconv.Itoa(p.RealPort), p.Country, p.Server, p.Profile, p.Proto)
+			})
+		})
 }
 
 func (a *api) accessCSV(w http.ResponseWriter, r *http.Request) {

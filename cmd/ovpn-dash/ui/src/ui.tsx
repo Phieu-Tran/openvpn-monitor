@@ -208,9 +208,11 @@ export function CountryTag({ cc }: { cc?: string }) {
 
 // CountryCards: users and sessions per country (of the real IP), most users first, with the
 // share of sessions as a bar. A card picks that country; again clears it. "" = unknown.
-export function CountryCards({ items, value, onPick, stale }: {
+export function CountryCards({ items, value, onPick, stale, units = ["user", "session"] }: {
   items: { country: string; users: number; sessions: number; bytes?: number }[]; value: string; onPick: (cc: string) => void; stale?: boolean;
+  units?: [string, string]; // what users and sessions count, singular
 }) {
+  const n = (v: number, unit: string) => `${v} ${unit}${v === 1 ? "" : "s"}`;
   const total = items.reduce((a, c) => a + c.sessions, 0) || 1;
   return (
     <ul className={`grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-2 ${stale ? "stale" : ""}`}>
@@ -229,7 +231,7 @@ export function CountryCards({ items, value, onPick, stale }: {
               </span>
               <span className="h-1 overflow-hidden rounded-full bg-default"><span className="block h-full rounded-full bg-accent" style={{ width: `${pct}%` }} /></span>
               <span className="num text-xs text-muted">
-                {c.users} {c.users === 1 ? "user" : "users"} · {c.sessions} {c.sessions === 1 ? "session" : "sessions"} ({pct < 1 ? "<1" : Math.round(pct)}%){c.bytes !== undefined && ` · ${bytes(c.bytes)}`}
+                {n(c.users, units[0])} · {n(c.sessions, units[1])} ({pct < 1 ? "<1" : Math.round(pct)}%){c.bytes !== undefined && ` · ${bytes(c.bytes)}`}
               </span>
             </button>
           </li>
@@ -271,6 +273,7 @@ export const ICONS = {
   right: "M9 6l6 6-6 6",
   device: "M5 5h14v10H5zM2 19h20M10 15v4M14 15v4",
   log: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  shield: "M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6zM12 8v4M12 16h.01",
 };
 export const Icon = ({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) => (
   <svg viewBox="0 0 24 24" className={`${className} shrink-0`} fill="none" stroke="currentColor" strokeWidth={1.8}

@@ -4,6 +4,29 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.9 - 2026-11-27
+
+Dash only: the agents stay on 0.1.8.
+
+### Added
+
+- "Not authenticated": connections to the OpenVPN ports that never finish their TLS
+  handshake (no valid certificate: scans from the internet, a wrong or revoked certificate),
+  logged apart and in red. Online lists the ones in progress (red panel, red count in the
+  menu); a view lists every attempt (start, real IP and country, server, profile, how long),
+  per country, searchable by IP, with CSV. `/api/probes`, `/api/probes.csv`.
+
+### Fixed
+
+- A "user" named UNDEF, with real IPs from many countries: OpenVPN shows a connection whose
+  TLS handshake is not done yet with the common name UNDEF. Scans were stored as sessions,
+  and a real user caught in that second kept the name UNDEF (with their access log rows).
+  Now such a connection is never a user: it goes to "Not authenticated" and, once its
+  handshake is done, to the user with their real name. Sessions stored as UNDEF get the real
+  name on the next poll while still open; the scans among them (never a VPN IP) move to
+  "Not authenticated"; older ones that cannot be named show a red "not authenticated" badge.
+- Online counts, charts and per-profile numbers no longer count connections not yet authenticated.
+
 ## 0.1.8 - 2026-11-27
 
 Upgrade the agents too (the access-log filter below lives there).

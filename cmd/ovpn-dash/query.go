@@ -577,6 +577,88 @@ func (s *store) accessSummary(ctx context.Context, f filter) (a accessSummary, e
 	return a, err
 }
 
+// probe is a connection that never finished its TLS handshake (CN "UNDEF").
+type probe struct {
+	Server   string    `json:"server"`
+	Instance string    `json:"instance"`
+	Profile  string    `json:"profile"`
+	Proto    string    `json:"proto"`
+	RealIP   string    `json:"real_ip"`
+	RealPort int       `json:"real_port"`
+	Country  string    `json:"country,omitempty"`
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"` // last poll that saw it
+}
+
+// probeWhere: attempts overlapping the range; q matches the real IP.
+func (f filter) probeWhere() (string, []any) {
+	w := []string{fmt.Sprintf("started <= %d AND ended >= %d", f.to.Unix(), f.from.Unix())}
+	var args []any
+	for _, c := range []struct{ col, v string }{{"server", f.server}, {"profile", f.profile}, {"proto", f.proto}, {"country", f.country}} {
+		if c.v != "" {
+			w = append(w, c.col+" = ?")
+			args = append(args, c.v)
+		}
+	}
+	if f.q != "" {
+		w = append(w, `real_ip LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.q)+"%")
+	}
+	return " WHERE " + strings.Join(w, " AND "), args
+}
+
+func (s *store) eachProbe(ctx context.Context, f filter, fn func(probe) error) error {
+	where, args := f.probeWhere()
+	order := orderBy(map[string]string{"start": "started", "end": "ended", "dur": "ended - started", "real": "country || real_ip",
+		"server": "server", "profile": "profile", "proto": "proto"}, f.sort, "start", f.desc)
+	rows, err := s.db.QueryContext(ctx, `SELECT server, instance, profile, proto, real_ip, real_port, country, started, ended FROM probes`+
+		where+" ORDER BY "+order+", started DESC LIMIT ? OFFSET ?", append(args, f.limit, f.offset)...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p probe
+		var start, end int64
+		if err := rows.Scan(&p.Server, &p.Instance, &p.Profile, &p.Proto, &p.RealIP, &p.RealPort, &p.Country, &start, &end); err != nil {
+			return err
+		}
+		p.Start, p.End = time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC()
+		if err := fn(p); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+type probeSummary struct {
+	Attempts  int          `json:"attempts"`
+	IPs       int          `json:"ips"`
+	Countries []countryUse `json:"countries"` // users = distinct IPs, sessions = attempts
+}
+
+func (s *store) probeSummary(ctx context.Context, f filter) (p probeSummary, err error) {
+	where, args := f.probeWhere()
+	if err = s.db.QueryRowContext(ctx, "SELECT count(*), count(DISTINCT real_ip) FROM probes"+where, args...).Scan(&p.Attempts, &p.IPs); err != nil {
+		return p, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT country, count(DISTINCT real_ip), count(*) FROM probes`+where+
+		` GROUP BY country ORDER BY count(*) DESC`, args...)
+	if err != nil {
+		return p, err
+	}
+	defer rows.Close()
+	p.Countries = []countryUse{}
+	for rows.Next() {
+		var c countryUse
+		if err := rows.Scan(&c.Country, &c.Users, &c.Sessions); err != nil {
+			return p, err
+		}
+		p.Countries = append(p.Countries, c)
+	}
+	return p, rows.Err()
+}
+
 // countryUse is one country (of the real IP) in the filtered sessions; "" = unknown.
 type countryUse struct {
 	Country  string `json:"country"`

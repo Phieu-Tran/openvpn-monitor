@@ -5,7 +5,8 @@ import { QuickSearch, SessionDrawer, UserDrawer } from "./Drawers";
 import { Sessions, UserList } from "./History";
 import type { Filters } from "./History";
 import { Online } from "./Online";
-import { F, PRESETS, bytes, rate, useHash, useJSON, usePref } from "./lib";
+import { ProbeLog } from "./Probes";
+import { F, PRESETS, UNDEF, bytes, rate, useHash, useJSON, usePref } from "./lib";
 import type { Facets, Live, LiveRow, Preset, Status } from "./lib";
 import { Icon, ServerSwitch } from "./ui";
 
@@ -14,6 +15,7 @@ const VIEWS = [
   { id: "history", label: "History", icon: "history" },
   { id: "users", label: "Users", icon: "users" },
   { id: "access", label: "Access log", icon: "log" },
+  { id: "probes", label: "Not authenticated", icon: "shield" },
 ] as const;
 
 type Theme = "system" | "light" | "dark";
@@ -47,7 +49,7 @@ const Banner = ({ tone, children }: { tone: "danger" | "warning"; children: stri
 
 export function App() {
   const { path, query } = useHash();
-  const view = path === "history" || path === "users" || path === "access" ? path : "online";
+  const view = path === "history" || path === "users" || path === "access" || path === "probes" ? path : "online";
   const [theme, setTheme] = useTheme();
   const [narrow, setNarrow] = usePref("nav.narrow", false);
 
@@ -87,7 +89,11 @@ export function App() {
     return () => removeEventListener("keydown", key);
   }, []);
 
-  const rows: LiveRow[] = (live.data?.instances ?? []).flatMap((i) => i.sessions.map((s) => ({ ...s, server: i.server, instance: i.name, proto: i.proto, profile: i.profile })));
+  // not yet authenticated (UNDEF) are not anyone: kept apart, in red
+  const rows: LiveRow[] = (live.data?.instances ?? []).flatMap((i) => i.sessions.filter((s) => s.cn !== UNDEF)
+    .map((s) => ({ ...s, server: i.server, instance: i.name, proto: i.proto, profile: i.profile })));
+  const probing = (live.data?.instances ?? []).filter((i) => !server || i.server === server)
+    .reduce((n, i) => n + i.sessions.filter((s) => s.cn === UNDEF).length, 0);
   const shown = server ? rows.filter((r) => r.server === server) : rows;
   // a profile keeps its chart colour: the position in this sorted list of all known profiles
   const profiles = [...new Set([...(facets.data?.profiles ?? []), ...(live.data?.instances.map((i) => i.profile) ?? [])])].sort();
@@ -113,6 +119,9 @@ export function App() {
     <a key={v.id} href={`#${v.id}`} aria-current={view === v.id ? "page" : undefined} title={v.label}
       className={`relative flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium whitespace-nowrap transition-colors ${view === v.id ? "bg-accent-soft text-accent-soft-foreground" : "text-muted hover:bg-default hover:text-foreground"}`}>
       <Icon name={v.icon} /><span className={narrow ? "md:hidden" : ""}>{v.label}</span>
+      {v.id === "probes" && probing > 0 && (
+        <span title="Connections not authenticated right now" className={`num rounded-full bg-danger px-1.5 text-[11px] leading-5 font-semibold text-danger-foreground ${narrow ? "md:absolute md:top-0.5 md:right-1" : "ml-auto"}`}>{probing}</span>
+      )}
       {v.id === "online" && live.data && (
         <span className={`num rounded-full bg-accent px-1.5 text-[11px] leading-5 font-semibold text-accent-foreground ${narrow ? "md:absolute md:top-0.5 md:right-1" : "ml-auto"}`}>{shown.length}</span>
       )}
@@ -180,6 +189,7 @@ export function App() {
           {view === "online" && <Online live={live.data} error={live.error} alertRate={alertRate} profiles={profiles} server={server} multi={multi} onSession={setSession} />}
           {view === "history" && <Sessions {...props} />}
           {view === "users" && <UserList {...props} />}
+          {view === "probes" && <ProbeLog server={server} multi={multi} profiles={profiles} />}
           {view === "access" && <AccessLog server={server} multi={multi} profiles={profiles} agents={status.data?.agents ?? []}
             linked={path === "access" ? linked : null} onUser={openUser} />}
         </main>

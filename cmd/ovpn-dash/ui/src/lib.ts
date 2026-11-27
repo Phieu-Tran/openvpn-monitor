@@ -15,6 +15,10 @@ export interface LiveSession {
   bytes_rx: number; bytes_tx: number; rate_rx: number; rate_tx: number; connected_since: string;
   cid: number; peer_id: number; cipher: string; last_ref?: string; country?: string;
 }
+// The CN OpenVPN shows until a connection's TLS handshake is done: a user connecting right now,
+// or a scanner / a client without a valid certificate that never finishes.
+export const UNDEF = "UNDEF";
+
 export interface Instance {
   server: string; name: string; profile: string; proto: string; up: boolean; last_error?: string; last_ok?: string;
   version?: string; sessions: LiveSession[];
@@ -40,6 +44,10 @@ export interface Access {
   access: AccessRow[]; destinations?: AccessDest[] | null;
   summary: { rows: number; connections: number; users: number; destinations: number };
 }
+export interface Probe {
+  server: string; instance: string; profile: string; proto: string; real_ip: string; real_port: number; country?: string; start: string; end: string;
+}
+export interface Probes { probes: Probe[]; summary: { attempts: number; ips: number; countries: CountryUse[] } }
 export interface CountryUse { country: string; users: number; sessions: number; bytes: number }
 export interface History {
   sessions: SessionRecord[];

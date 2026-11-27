@@ -136,6 +136,22 @@ CREATE TABLE IF NOT EXISTS flows (
   PRIMARY KEY (server, t, src, dst, port, proto)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS flows_t  ON flows (t);
+-- Connections that never finished their TLS handshake (CN "UNDEF"): scanners, clients
+-- without a valid certificate. One that does finish leaves this table for sessions.
+CREATE TABLE IF NOT EXISTS probes (
+  server    TEXT    NOT NULL,
+  instance  TEXT    NOT NULL, -- <server>/<name>
+  cid       INTEGER NOT NULL,
+  started   INTEGER NOT NULL,
+  ended     INTEGER NOT NULL, -- last poll that saw it
+  profile   TEXT    NOT NULL,
+  proto     TEXT    NOT NULL,
+  real_ip   TEXT    NOT NULL,
+  real_port INTEGER NOT NULL,
+  country   TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (instance, cid, started)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS probes_ended ON probes (ended);
 CREATE INDEX IF NOT EXISTS flows_cn ON flows (cn, t);
 ` + samplesSchema
 
@@ -305,6 +321,7 @@ const upsertSQL = `INSERT INTO sessions
  ON CONFLICT (instance, cid, started) DO UPDATE SET ended = excluded.ended, bytes_rx = excluded.bytes_rx,
    bytes_tx = excluded.bytes_tx, peak = max(peak, excluded.peak), open = excluded.open,
    vpn_ip = CASE WHEN excluded.vpn_ip = '' THEN vpn_ip ELSE excluded.vpn_ip END,
+   cn = CASE WHEN cn = 'UNDEF' THEN excluded.cn ELSE cn END,
    country = CASE WHEN country = '' THEN excluded.country ELSE country END,
    device = CASE WHEN excluded.device = '' THEN device ELSE excluded.device END`
 
@@ -447,6 +464,15 @@ func (s *store) write(r agentResp, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	probe, err := tx.Prepare(`INSERT INTO probes VALUES (?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT DO UPDATE SET ended = excluded.ended`)
+	if err != nil {
+		return err
+	}
+	authed, err := tx.Prepare("DELETE FROM probes WHERE instance = ? AND cid = ? AND started = ?")
+	if err != nil {
+		return err
+	}
 	sample := now.Sub(s.lastPoint) >= sampleEvery
 	samples := map[string]*point{} // per server
 	for _, in := range r.Instances {
@@ -460,8 +486,10 @@ func (s *store) write(r agentResp, now time.Time) error {
 			if in.Up {
 				p.Up++
 			}
-			p.Online[in.Profile] += len(in.Sessions)
 			for _, c := range in.Sessions {
+				if c.CN != unauthenticated {
+					p.Online[in.Profile]++
+				}
 				p.Rx += c.RateRx
 				p.Tx += c.RateTx
 			}
@@ -471,6 +499,16 @@ func (s *store) write(r agentResp, now time.Time) error {
 		}
 		inst := in.Server + "/" + in.Name
 		for _, c := range in.Sessions {
+			started := c.ConnectedSince.Unix()
+			if c.CN == unauthenticated {
+				if _, err := probe.Exec(in.Server, inst, int64(c.CID), started, now.Unix(), in.Profile, in.Proto, c.RealIP, c.RealPort, c.Country); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := authed.Exec(inst, int64(c.CID), started); err != nil { // it was a user connecting
+				return err
+			}
 			err := upsert(st, record{Server: in.Server, CN: c.CN, Profile: in.Profile, Proto: in.Proto, Instance: inst, CID: c.CID,
 				RealIP: c.RealIP, RealPort: c.RealPort, VPNIP: c.VPNIP, Start: c.ConnectedSince, End: now,
 				BytesRx: c.BytesRx, BytesTx: c.BytesTx, Peak: c.RateRx + c.RateTx, Open: true, Country: c.Country, Device: c.Device})
@@ -511,7 +549,8 @@ func (s *store) prune(now time.Time) {
 
 func (s *store) delete(before int64) (int64, error) {
 	var n int64
-	for _, q := range []string{"DELETE FROM sessions WHERE open = 0 AND ended < ?", "DELETE FROM samples WHERE t < ?", "DELETE FROM flows WHERE t < ?"} {
+	for _, q := range []string{"DELETE FROM sessions WHERE open = 0 AND ended < ?", "DELETE FROM samples WHERE t < ?", "DELETE FROM flows WHERE t < ?",
+		"DELETE FROM probes WHERE ended < ?"} {
 		res, err := s.db.Exec(q, before)
 		if err != nil {
 			return n, err
@@ -529,6 +568,14 @@ func (s *store) used() (n int64, err error) {
 }
 
 func (s *store) doPrune(now time.Time) error {
+	// Connections that never finished their TLS handshake (CN "UNDEF", never a VPN IP),
+	// stored as sessions by 0.1.8 and older, move to probes. Hourly, so the ones open
+	// during the upgrade follow once closed. Index on cn: cheap.
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO probes SELECT server, instance, cid, started, ended, profile, proto, real_ip, real_port, country
+			FROM sessions WHERE cn = 'UNDEF' AND vpn_ip = '' AND open = 0;
+		DELETE FROM sessions WHERE cn = 'UNDEF' AND vpn_ip = '' AND open = 0;`); err != nil {
+		return err
+	}
 	if _, err := s.delete(now.Add(-s.retention).Unix()); err != nil {
 		return err
 	}
@@ -544,7 +591,7 @@ func (s *store) doPrune(now time.Time) error {
 		for used > s.maxBytes/10*9 {
 			var oldest sql.NullInt64
 			if err := s.db.QueryRow(`SELECT min(m) FROM (SELECT (SELECT ended FROM sessions WHERE open = 0 ORDER BY ended LIMIT 1) AS m
-				UNION ALL SELECT min(t) FROM samples UNION ALL SELECT min(t) FROM flows)`).Scan(&oldest); err != nil {
+				UNION ALL SELECT min(t) FROM samples UNION ALL SELECT min(t) FROM flows UNION ALL SELECT min(ended) FROM probes)`).Scan(&oldest); err != nil {
 				return err
 			}
 			if !oldest.Valid {
@@ -608,7 +655,7 @@ func (s *store) compact(cut int64) error {
 // fillCountries looks up sessions recorded without a country (GeoIP database
 // installed later).
 func (s *store) fillCountries(country func(string) string) error {
-	rows, err := s.db.Query("SELECT DISTINCT real_ip FROM sessions WHERE country = ''")
+	rows, err := s.db.Query("SELECT real_ip FROM sessions WHERE country = '' UNION SELECT real_ip FROM probes WHERE country = ''")
 	if err != nil {
 		return err
 	}
@@ -648,11 +695,15 @@ func (s *store) fillCountries(country func(string) string) error {
 		}
 	}
 	if _, err := tx.Exec(`UPDATE sessions SET country = geo.cc FROM geo WHERE sessions.country = '' AND sessions.real_ip = geo.ip;
+		UPDATE probes SET country = geo.cc FROM geo WHERE probes.country = '' AND probes.real_ip = geo.ip;
 		DROP TABLE geo;`); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
+
+// unauthenticated is the CN OpenVPN shows until a client's TLS handshake is done.
+const unauthenticated = "UNDEF"
 
 // agentFlow is one minute of connections, as served by ovpn-agent /api/v1/flows.
 type agentFlow struct {
@@ -694,7 +745,7 @@ func (s *store) addFlows(server string, flows []agentFlow, skip []string, now ti
 	st, err := tx.Prepare(`INSERT INTO flows (server, t, src, dst, port, proto, first, last, n, cn, profile)
 		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, coalesce(u.cn, ''), coalesce(u.profile, '')
 		FROM (SELECT 1) LEFT JOIN (SELECT cn, profile FROM sessions
-			WHERE ended >= ?7 - 30 AND server = ?1 AND vpn_ip = ?3 AND started <= ?7 ORDER BY started DESC LIMIT 1) u
+			WHERE ended >= ?7 - 30 AND server = ?1 AND vpn_ip = ?3 AND started <= ?7 AND cn <> 'UNDEF' ORDER BY started DESC LIMIT 1) u
 		WHERE true
 		ON CONFLICT DO UPDATE SET first = excluded.first, last = excluded.last, n = excluded.n, cn = excluded.cn, profile = excluded.profile`)
 	if err != nil {
@@ -708,9 +759,9 @@ func (s *store) addFlows(server string, flows []agentFlow, skip []string, now ti
 			return err
 		}
 	}
-	const owner = `FROM sessions WHERE ended >= flows.first - 30 AND server = flows.server AND vpn_ip = flows.src AND started <= flows.first`
+	const owner = `FROM sessions WHERE ended >= flows.first - 30 AND server = flows.server AND vpn_ip = flows.src AND started <= flows.first AND cn <> 'UNDEF'`
 	if _, err := tx.Exec(`UPDATE flows SET (cn, profile) = (SELECT cn, profile `+owner+` ORDER BY started DESC LIMIT 1)
-		WHERE cn = '' AND t >= ? AND server = ? AND EXISTS (SELECT 1 `+owner+`)`, now.Add(-2*time.Hour).Unix(), server); err != nil {
+		WHERE ((cn = '' AND t >= ?) OR cn = 'UNDEF') AND server = ? AND EXISTS (SELECT 1 `+owner+`)`, now.Add(-2*time.Hour).Unix(), server); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

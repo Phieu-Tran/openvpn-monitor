@@ -299,6 +299,15 @@ func (in *inst) churn() {
 		i := rand.IntN(len(in.clients))
 		in.clients = append(in.clients[:i], in.clients[i+1:]...)
 	}
+	// A scan from the internet: OpenVPN lists it as UNDEF, without a VPN IP, until it gives up.
+	in.clients = slices.DeleteFunc(in.clients, func(c *client) bool { return c.cn == "UNDEF" && time.Since(c.since) > 15*time.Second })
+	if rand.IntN(100) < 2 {
+		in.nextCID++
+		o := func() int { return 1 + rand.IntN(254) }
+		ip := fmt.Sprintf("%d.%d.%d.%d", []int{45, 89, 167, 185, 193}[rand.IntN(5)], o(), o(), o())
+		in.clients = append(in.clients, &client{cn: "UNDEF", real: fmt.Sprintf("%s:%d", ip, 1024+rand.IntN(60000)), since: time.Now(),
+			cid: in.nextCID, peer: int(in.nextCID - 1), cipher: "AES-256-GCM"})
+	}
 	n := len(in.clients)
 	in.mu.Unlock()
 	if n < 7 && rand.IntN(100) < 8 {

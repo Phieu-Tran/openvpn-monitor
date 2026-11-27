@@ -68,23 +68,23 @@ What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 On any machine with Docker (Git Bash on Windows works):
 
 ```sh
-scripts/release.sh 0.1.8
+scripts/release.sh 0.1.9
 ```
 
 Result in `dist/`:
 
 ```text
-ovpn-agent-0.1.8.image.tar.gz    image vihat/ovpn-agent:0.1.8 (~3 MB)
+ovpn-agent-0.1.9.image.tar.gz    image vihat/ovpn-agent:0.1.9 (~3 MB)
 ovpn-agent/                      docker-compose.yml + .env + data/ -> OpenVPN host
-ovpn-dash-0.1.8.image.tar.gz     image vihat/ovpn-dash:0.1.8 (~10 MB)
+ovpn-dash-0.1.9.image.tar.gz     image vihat/ovpn-dash:0.1.9 (~10 MB)
 ovpn-dash/                       docker-compose.yml + .env + data/ -> monitor host
 SHA256SUMS
 ```
 
 Builds are reproducible (same source + version = same binaries). Node is only needed inside Docker.
 
-With GitHub instead: push the repo, then `git tag v0.1.8 && git push --tags`. The workflow
-publishes `ghcr.io/<owner>/ovpn-agent:0.1.8` and `ghcr.io/<owner>/ovpn-dash:0.1.8`; on the hosts,
+With GitHub instead: push the repo, then `git tag v0.1.9 && git push --tags`. The workflow
+publishes `ghcr.io/<owner>/ovpn-agent:0.1.9` and `ghcr.io/<owner>/ovpn-dash:0.1.9`; on the hosts,
 set that name on the `image:` line and use `docker compose pull` instead of `docker load`.
 
 ## Lab
@@ -153,7 +153,7 @@ variable per OpenVPN profile. `scripts/release.sh` puts both files into `dist/`.
 ### 1. Monitor host (dash), first
 
 ```sh
-docker load -i /tmp/ovpn-dash-0.1.8.image.tar.gz && rm /tmp/ovpn-dash-0.1.8.image.tar.gz
+docker load -i /tmp/ovpn-dash-0.1.9.image.tar.gz && rm /tmp/ovpn-dash-0.1.9.image.tar.gz
 ss -ltn | grep ':9178 '                 # nothing: port is free
 cd /opt/ovpn-dash
 grep OVPN_AGENT .env                    # http://<vpn-host>:9177, or name=url,name=url (see "Several OpenVPN hosts")
@@ -185,7 +185,7 @@ and basic auth. The page loads and shows "agent unreachable".
 ### 2. OpenVPN host (agent + iptables)
 
 ```sh
-docker load -i /tmp/ovpn-agent-0.1.8.image.tar.gz && rm /tmp/ovpn-agent-0.1.8.image.tar.gz
+docker load -i /tmp/ovpn-agent-0.1.9.image.tar.gz && rm /tmp/ovpn-agent-0.1.9.image.tar.gz
 ls -ldn <profile-dir>/data/run          # drwx------ 0 0: hence user "0:0" (no capabilities)
 cd /opt/ovpn-agent
 cat .env                                # OVPN_LISTEN=<vpn-host>:9177, one OVPN_RUN_* per profile
@@ -354,8 +354,8 @@ ls -ldn data/run && ls -ln data/run/           # drwx------ 0 0; mgmt-{udp,tcp}.
 # connect test1 to UDP and test2 to TCP from a laptop/phone
 
 # 3. On <VM>: the release folders from dist/ (both on the VM)
-docker load -i /tmp/ovpn-agent-0.1.8.image.tar.gz
-docker load -i /tmp/ovpn-dash-0.1.8.image.tar.gz
+docker load -i /tmp/ovpn-agent-0.1.9.image.tar.gz
+docker load -i /tmp/ovpn-dash-0.1.9.image.tar.gz
 cd /opt/ovpn-agent
 vi docker-compose.yml   # keep one volume line: ${OVPN_RUN_TEST}:/srv/ovpn/test:ro
 printf 'OVPN_LISTEN=<VM>:9177\nOVPN_RUN_TEST=/srv/openvpn-test/data/run\n' > .env
@@ -374,7 +374,7 @@ Checks on `<VM>`:
 - `cat /srv/openvpn-test/data/state/status-udp.log`: same CN, real address, connected since.
 - Restart one OpenVPN container: the agent shows it down at most one cycle, then up again.
 - Raw capture for the parser tests (save under `internal/mgmt/testdata/`, CNs and IPs masked):
-  `docker run --rm --network none --user 0:0 -v /srv/openvpn-test/data/run:/s:ro vihat/ovpn-agent:0.1.8 -dump /s/mgmt-udp.sock`
+  `docker run --rm --network none --user 0:0 -v /srv/openvpn-test/data/run:/s:ro vihat/ovpn-agent:0.1.9 -dump /s/mgmt-udp.sock`
 
 Cleanup: `docker compose down` in `/opt/ovpn-agent`, `/opt/ovpn-dash` and `/srv/openvpn-test`.
 
@@ -420,6 +420,8 @@ ovpn-dash (behind Nginx, no token):
   (peak online per bucket, average rate).
 - `GET /api/heatmap?from=&to=` (default 30 days): average and peak online per weekday and hour.
 - `GET /api/facets`: profiles and countries present in the history.
+- `GET /api/probes` (and `/api/probes.csv`): connections that never finished their TLS handshake
+  (OpenVPN shows them as UNDEF: scans, no valid certificate), per attempt and per country.
 - `GET /api/access` (and `/api/access.csv`): the access log, per user, destination and
   minute; filters `q` (user, VPN IP, `ip`, `:port`, `ip:port`), `cn`, `server`, `proto`,
   `port` (only this port), `xport` (all but this port), `dests=1` (also per destination).
