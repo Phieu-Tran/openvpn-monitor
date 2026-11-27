@@ -4,6 +4,30 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.8 - 2026-11-27
+
+Upgrade the agents too (the access-log filter below lives there).
+
+### Changed
+
+- Access log: connections to the VPN server itself (its tun gateways, LAN and public
+  addresses) and to the broadcast address of its subnets (Windows NetBIOS chatter) are left
+  out by the agent, which reads both from its interfaces: any subnet size, nothing to
+  configure. Multicast (mDNS, SSDP) and 255.255.255.255 are left out too. Rows 0.1.7 stored to
+  these addresses are removed once the upgraded agent reports them.
+- Access log: HTTPS (port 443) apart: hidden by default, "Only 443" or "All ports" on demand;
+  a user's details list 443 separately. `/api/access` takes `port=` and `xport=` (all but).
+- A user's details show "Access, last 30 days" right under the summary, always (with a note
+  when nothing is recorded): the destinations (IP:port, connections, last time) and the latest
+  rows, with a link to all of them.
+
+### Fixed
+
+- Access log rows of some users showed "unknown": OpenVPN can list a client before it has its
+  VPN IP, and a session first seen that way kept an empty VPN IP in the history. The VPN IP
+  is now updated on later polls, and rows of the last two hours without a user are matched
+  again on every poll.
+
 ## 0.1.7 - 2026-11-27
 
 ### Added

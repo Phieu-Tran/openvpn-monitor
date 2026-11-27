@@ -21,6 +21,7 @@ type filter struct {
 	from, to                       time.Time
 	q, profile, proto, country, cn string
 	server                         string
+	port, xport                    int    // access log: only this port / all but this port; 0 = any
 	plat                           string // IV_PLAT, or "unknown" for sessions without a device
 	alerts                         bool
 	rate                           float64 // alert threshold in bytes/s; 0 = alerts off
@@ -483,6 +484,12 @@ type access struct {
 // user, VPN IP or destination ("192.0.2.10", ":445" and "192.0.2.10:445" all work).
 func (f filter) accessWhere() (string, []any) {
 	w := []string{fmt.Sprintf("t BETWEEN %d AND %d", f.from.Unix()/60*60, f.to.Unix())}
+	if f.port > 0 {
+		w = append(w, fmt.Sprintf("port = %d", f.port))
+	}
+	if f.xport > 0 {
+		w = append(w, fmt.Sprintf("port <> %d", f.xport))
+	}
 	var args []any
 	for col, v := range map[string]string{"server": f.server, "cn": f.cn, "proto": f.proto, "profile": f.profile} {
 		if v != "" {
@@ -521,6 +528,39 @@ func (s *store) eachAccess(ctx context.Context, f filter, fn func(access) error)
 		}
 	}
 	return rows.Err()
+}
+
+// accessDest is one destination in the filtered access log, for a user's details.
+type accessDest struct {
+	Dst         string    `json:"dst"`
+	Port        int       `json:"port"`
+	Proto       string    `json:"proto"`
+	Connections int       `json:"connections"`
+	Minutes     int       `json:"minutes"` // rows: minutes with at least one new connection
+	First       time.Time `json:"first"`
+	Last        time.Time `json:"last"`
+}
+
+// accessDests sums the access log per destination, most recent first (up to 50).
+func (s *store) accessDests(ctx context.Context, f filter) ([]accessDest, error) {
+	where, args := f.accessWhere()
+	rows, err := s.db.QueryContext(ctx, `SELECT dst, port, proto, sum(n), count(*), min(first), max(last) AS l
+		FROM flows`+where+` GROUP BY dst, port, proto ORDER BY l DESC LIMIT 50`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []accessDest{}
+	for rows.Next() {
+		var d accessDest
+		var first, last int64
+		if err := rows.Scan(&d.Dst, &d.Port, &d.Proto, &d.Connections, &d.Minutes, &first, &last); err != nil {
+			return nil, err
+		}
+		d.First, d.Last = time.Unix(first, 0).UTC(), time.Unix(last, 0).UTC()
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 type accessSummary struct {

@@ -184,9 +184,11 @@ func TestAccessLog(t *testing.T) {
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/flows" {
 			asked = append(asked, r.URL.Query().Get("since"))
-			json.NewEncoder(w).Encode(map[string]any{"enabled": true, "flows": []agentFlow{
+			json.NewEncoder(w).Encode(map[string]any{"enabled": true, "skip": []string{"10.8.0.1", "10.8.12.255"}, "flows": []agentFlow{
 				{T: min, Src: "10.8.0.2", Dst: "192.0.2.10", Port: 445, Proto: "tcp", First: min + 5, Last: min + 50, N: 12},
 				{T: min + 60, Src: "10.8.0.99", Dst: "192.0.2.11", Port: 53, Proto: "udp", First: min + 61, Last: min + 61, N: 1},
+				{T: min, Src: "10.8.12.33", Dst: "10.8.12.255", Port: 137, Proto: "udp", First: min, Last: min, N: 9}, // NetBIOS broadcast
+				{T: min, Src: "10.8.0.2", Dst: "224.0.0.251", Port: 5353, Proto: "udp", First: min, Last: min, N: 3},  // mDNS
 			}})
 			return
 		}
@@ -236,14 +238,67 @@ func TestAccessLog(t *testing.T) {
 		t.Errorf("rows: %+v", all.Access)
 	}
 	for url, want := range map[string]int{"/api/access?q=192.0.2.10:445": 1, "/api/access?q=:53": 1, "/api/access?cn=u1": 1,
-		"/api/access?proto=udp": 1, "/api/access?server=b": 0, "/api/access?q=%25": 0, "/api/access?sort=n&dir=asc": 2} {
+		"/api/access?proto=udp": 1, "/api/access?server=b": 0, "/api/access?xport=445": 1, "/api/access?port=445": 1, "/api/access?port=443": 0, "/api/access?q=%25": 0, "/api/access?sort=n&dir=asc": 2} {
 		if got := get(url); len(got.Access) != want {
 			t.Errorf("%s: %d rows", url, len(got.Access))
 		}
 	}
+	// a user's details: per destination
 	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/access?cn=u1&dests=1", nil))
+	var d struct{ Destinations []accessDest }
+	if json.Unmarshal(w.Body.Bytes(), &d); len(d.Destinations) != 1 || d.Destinations[0].Connections != 12 || d.Destinations[0].Port != 445 {
+		t.Errorf("destinations: %s", w.Body)
+	}
+	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/access.csv", nil))
 	if body := w.Body.String(); !strings.Contains(body, ",u1,all-dev,a,10.8.0.2,192.0.2.10,445,tcp,12\r\n") {
 		t.Errorf("csv: %q", body)
+	}
+}
+
+func TestNoiseFlows(t *testing.T) {
+	for dst, noise := range map[string]bool{"255.255.255.255": true, "239.255.255.250": true, "224.0.0.251": true, "ff02::fb": true,
+		"10.8.12.255": false, "192.0.2.1": false, "192.0.2.10": false} { // subnet broadcasts and the host: the agent's skip list
+		if noiseFlow(dst) != noise {
+			t.Errorf("%s: noise = %v", dst, !noise)
+		}
+	}
+	// multicast rows that 0.1.7 stored go once, on the next start
+	dir := t.TempDir()
+	s := open(t, dir, 90*24*time.Hour, 0)
+	now := time.Now().Unix() / 60 * 60
+	insert := func(dst string) {
+		if _, err := s.db.Exec("INSERT INTO flows VALUES ('a', ?, '10.8.12.33', ?, 137, 'udp', ?, ?, 1, '', '')", now, dst, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dst := range []string{"255.255.255.255", "239.255.255.250", "ff02::fb", "10.8.12.255", "10.8.12.1", "192.0.2.10"} {
+		insert(dst)
+	}
+	s.db.Exec("DELETE FROM meta WHERE k = 'flows_noise'")
+	s.db.Close()
+	s = open(t, dir, 90*24*time.Hour, 0)
+	left := func() string {
+		var out []string
+		rows, _ := s.db.Query("SELECT dst FROM flows ORDER BY dst")
+		for rows.Next() {
+			var d string
+			rows.Scan(&d)
+			out = append(out, d)
+		}
+		rows.Close()
+		return strings.Join(out, " ")
+	}
+	if got := left(); got != "10.8.12.1 10.8.12.255 192.0.2.10" {
+		t.Errorf("after the multicast cleanup: %v", got)
+	}
+	// the agent's skip list (its addresses, its subnets' broadcasts) removes the rest, and new rows to them
+	skip := []string{"10.8.12.1", "10.8.12.255", "192.0.2.3"}
+	if err := s.addFlows("a", []agentFlow{{T: now, Src: "10.8.12.33", Dst: "192.0.2.3", Port: 22, Proto: "tcp", First: now, Last: now, N: 1}}, skip, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := left(); got != "192.0.2.10" {
+		t.Errorf("after the skip list: %v", got)
 	}
 }

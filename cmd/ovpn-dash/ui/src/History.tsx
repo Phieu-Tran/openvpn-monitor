@@ -102,16 +102,17 @@ export function Pager({ page, total, onPage }: { page: number; total: number; on
 }
 
 // usePaged runs one filtered, sorted, paged query; the database does the work.
-export function usePaged<T>(path: string, filters: Filters, sort: Sort) {
+// extra: more query parameters, part of the key (a new value starts at the first page).
+export function usePaged<T>(path: string, filters: Filters, sort: Sort, extra: Record<string, string> = {}) {
   const q = useDebounced(filters.q.trim());
   const f = { ...filters, q };
-  const base = JSON.stringify([rangeKey(f.range), q, f.server, f.profile, f.proto, f.country, f.plat, f.alerts, sort]);
+  const base = JSON.stringify([rangeKey(f.range), q, f.server, f.profile, f.proto, f.country, f.plat, f.alerts, sort, extra]);
   const [page, setPage] = useState({ base, n: 0 });
   const n = page.base === base ? page.n : 0; // new filters start at the first page
   useEffect(() => { if (page.base !== base) setPage({ base, n: 0 }); }, [base, page.base]);
   const order = { sort: sort.k, dir: sort.dir > 0 ? "asc" : "desc" };
-  const result = useJSON<T>(`${path}|${base}|${n}`, () => `${path}?${params(f, { ...order, limit: String(PAGE), offset: String(n * PAGE) })}`, 30000);
-  return { ...result, page: n, setPage: (v: number) => setPage({ base, n: v }), csvURL: () => `${path}.csv?${params(f, order)}` };
+  const result = useJSON<T>(`${path}|${base}|${n}`, () => `${path}?${params(f, { ...extra, ...order, limit: String(PAGE), offset: String(n * PAGE) })}`, 30000);
+  return { ...result, page: n, setPage: (v: number) => setPage({ base, n: v }), csvURL: () => `${path}.csv?${params(f, { ...extra, ...order })}` };
 }
 
 // Devices: every kind of device (OS + app) that connected in the filtered sessions.

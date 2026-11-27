@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -46,6 +47,14 @@ type flowLog struct {
 
 	events, dropped atomic.Uint64 // matching connections seen; lost (kernel buffer full, memory cap)
 
+	// Destinations that are not access to anything: this host's own addresses (tun
+	// gateways, LAN, public: the client talks to the VPN server itself) and the broadcast
+	// address of each of its subnets (Windows NetBIOS chatter), both read from the
+	// interfaces, so any subnet size works. Re-read on every dash fetch: OpenVPN restarts
+	// recreate the tun interfaces.
+	addrs func() ([]net.Addr, error)
+	local atomic.Pointer[map[netip.Addr]bool]
+
 	mu      sync.Mutex
 	buckets map[flowKey]*flow
 	err     string // why capture stopped, if it did
@@ -68,7 +77,52 @@ func parseNets(s string) ([]netip.Prefix, error) {
 }
 
 func newFlowLog(nets []netip.Prefix) *flowLog {
-	return &flowLog{nets: nets, buckets: map[flowKey]*flow{}}
+	l := &flowLog{nets: nets, buckets: map[flowKey]*flow{}, addrs: net.InterfaceAddrs}
+	l.readLocal()
+	return l
+}
+
+func (l *flowLog) readLocal() {
+	as, err := l.addrs()
+	if err != nil {
+		return // keep the last good set
+	}
+	m := map[netip.Addr]bool{}
+	for _, a := range as {
+		p, err := netip.ParsePrefix(a.String())
+		if err != nil {
+			continue
+		}
+		m[p.Addr().Unmap()] = true
+		if p.Addr().Is4() && p.Bits() < 31 { // the subnet's broadcast: its last address
+			ip := p.Masked().Addr().As4()
+			v := binary.BigEndian.Uint32(ip[:]) | (1<<(32-p.Bits()) - 1)
+			m[netip.AddrFrom4([4]byte(binary.BigEndian.AppendUint32(nil, v)))] = true
+		}
+	}
+	l.local.Store(&m)
+}
+
+// skip: the destinations left out (see local), plus multicast and the limited broadcast.
+func (l *flowLog) skip(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if ip.IsMulticast() || ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+		return true
+	}
+	m := l.local.Load()
+	return m != nil && (*m)[ip]
+}
+
+// skipped lists this host's addresses and broadcasts, for the dash to drop rows stored before.
+func (l *flowLog) skipped() []string {
+	out := []string{}
+	if m := l.local.Load(); m != nil {
+		for ip := range *m {
+			out = append(out, ip.String())
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (l *flowLog) from(ip netip.Addr) bool {
@@ -82,7 +136,7 @@ func (l *flowLog) from(ip netip.Addr) bool {
 
 // add counts one new connection.
 func (l *flowLog) add(at time.Time, src, dst netip.Addr, port uint16, proto uint8) {
-	if (proto != 6 && proto != 17) || !l.from(src) {
+	if (proto != 6 && proto != 17) || !l.from(src) || l.skip(dst) {
 		return
 	}
 	l.events.Add(1)
@@ -117,6 +171,7 @@ func (l *flowLog) prune(now time.Time) {
 
 // closed returns the minutes after since that are over, oldest first.
 func (l *flowLog) closed(since int64, now time.Time) []flow {
+	l.readLocal()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.prune(now)
@@ -138,11 +193,12 @@ func (l *flowLog) failed(err error) {
 }
 
 type flowStatus struct {
-	Enabled bool   `json:"enabled"`
-	Error   string `json:"error,omitempty"`
-	Events  uint64 `json:"events"`
-	Dropped uint64 `json:"dropped"`
-	Flows   []flow `json:"flows"`
+	Enabled bool     `json:"enabled"`
+	Error   string   `json:"error,omitempty"`
+	Events  uint64   `json:"events"`
+	Dropped uint64   `json:"dropped"`
+	Skip    []string `json:"skip,omitempty"` // destinations left out: this host and its subnets' broadcasts
+	Flows   []flow   `json:"flows"`
 }
 
 func (l *flowLog) status(since int64, now time.Time) flowStatus {
@@ -152,7 +208,7 @@ func (l *flowLog) status(since int64, now time.Time) flowStatus {
 	flows := l.closed(since, now)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return flowStatus{Enabled: true, Error: l.err, Events: l.events.Load(), Dropped: l.dropped.Load(), Flows: flows}
+	return flowStatus{Enabled: true, Error: l.err, Events: l.events.Load(), Dropped: l.dropped.Load(), Skip: l.skipped(), Flows: flows}
 }
 
 func (l *flowLog) metrics() string {

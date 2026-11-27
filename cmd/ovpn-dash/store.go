@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -166,6 +168,8 @@ type store struct {
 
 	writeErrors atomic.Uint64 // shown in /api/status and /metrics
 
+	skipSeen map[string]string // per server, the agent's skip list already applied (poll loop only)
+
 	mu       sync.Mutex // guards the caches
 	counts   storeStatus
 	countsAt time.Time
@@ -195,7 +199,7 @@ func openStore(dir, server string, retention time.Duration, maxBytes int64, coun
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
-	s := &store{dir: dir, retention: retention, maxBytes: maxBytes}
+	s := &store{dir: dir, retention: retention, maxBytes: maxBytes, skipSeen: map[string]string{}}
 	db, err := openDB(s.path("ovpn-dash.db"))
 	if err != nil {
 		return nil, err
@@ -238,6 +242,16 @@ func openStore(dir, server string, retention time.Duration, maxBytes int64, coun
 			return nil, fmt.Errorf("adding servers to the history: %w", err)
 		}
 		log.Printf("history so far assigned to server %q", server)
+	}
+	// Once: the multicast rows 0.1.7 stored.
+	if res, err := db.Exec("INSERT OR IGNORE INTO meta VALUES ('flows_noise', 1)"); err != nil {
+		db.Close()
+		return nil, err
+	} else if n, _ := res.RowsAffected(); n == 1 {
+		if _, err := db.Exec(noiseSQL); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("access log cleanup: %w", err)
+		}
 	}
 	if err := s.importJSONL(server, country); err != nil {
 		db.Close()
@@ -290,6 +304,7 @@ const upsertSQL = `INSERT INTO sessions
  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
  ON CONFLICT (instance, cid, started) DO UPDATE SET ended = excluded.ended, bytes_rx = excluded.bytes_rx,
    bytes_tx = excluded.bytes_tx, peak = max(peak, excluded.peak), open = excluded.open,
+   vpn_ip = CASE WHEN excluded.vpn_ip = '' THEN vpn_ip ELSE excluded.vpn_ip END,
    country = CASE WHEN country = '' THEN excluded.country ELSE country END,
    device = CASE WHEN excluded.device = '' THEN device ELSE excluded.device END`
 
@@ -653,16 +668,29 @@ type agentFlow struct {
 
 // addFlows stores one agent's closed minutes. The user is the session that had the
 // source VPN IP at that time (its end is the last poll that saw it, hence the slack).
-// Replaces a minute fetched twice (dash restart).
-func (s *store) addFlows(server string, flows []agentFlow) error {
-	if len(flows) == 0 {
-		return nil
-	}
+// Replaces a minute fetched twice (dash restart). Rows of the last two hours still without
+// a user are matched again: OpenVPN may list a client before it has its VPN IP, and that
+// session gets its IP only on a later poll.
+//
+// skip is what the agent leaves out (its host's addresses and subnet broadcasts, read from
+// its interfaces); rows to them stored by an older agent are deleted when the list changes.
+func (s *store) addFlows(server string, flows []agentFlow, skip []string, now time.Time) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	key := strings.Join(skip, ",")
+	if len(skip) > 0 && s.skipSeen[server] != key {
+		q := "DELETE FROM flows WHERE server = ? AND dst IN (?" + strings.Repeat(",?", len(skip)-1) + ")"
+		args := []any{server}
+		for _, d := range skip {
+			args = append(args, d)
+		}
+		if _, err := tx.Exec(q, args...); err != nil {
+			return err
+		}
+	}
 	st, err := tx.Prepare(`INSERT INTO flows (server, t, src, dst, port, proto, first, last, n, cn, profile)
 		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, coalesce(u.cn, ''), coalesce(u.profile, '')
 		FROM (SELECT 1) LEFT JOIN (SELECT cn, profile FROM sessions
@@ -673,12 +701,38 @@ func (s *store) addFlows(server string, flows []agentFlow) error {
 		return err
 	}
 	for _, f := range flows {
+		if noiseFlow(f.Dst) || slices.Contains(skip, f.Dst) {
+			continue
+		}
 		if _, err := st.Exec(server, f.T, f.Src, f.Dst, f.Port, f.Proto, f.First, f.Last, f.N); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	const owner = `FROM sessions WHERE ended >= flows.first - 30 AND server = flows.server AND vpn_ip = flows.src AND started <= flows.first`
+	if _, err := tx.Exec(`UPDATE flows SET (cn, profile) = (SELECT cn, profile `+owner+` ORDER BY started DESC LIMIT 1)
+		WHERE cn = '' AND t >= ? AND server = ? AND EXISTS (SELECT 1 `+owner+`)`, now.Add(-2*time.Hour).Unix(), server); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if len(skip) > 0 {
+		s.skipSeen[server] = key // applied
+	}
+	return nil
 }
+
+// noiseFlow: multicast (mDNS, SSDP) and the limited broadcast are the client's own
+// chatter, whatever the network; the agent also leaves out its host's addresses and the
+// broadcast of each of its subnets (see addFlows' skip).
+func noiseFlow(dst string) bool {
+	d, err := netip.ParseAddr(dst)
+	return err == nil && (d.IsMulticast() || d == netip.AddrFrom4([4]byte{255, 255, 255, 255}))
+}
+
+// noiseSQL is noiseFlow for rows stored by 0.1.7, which kept them.
+const noiseSQL = `DELETE FROM flows WHERE dst = '255.255.255.255' OR dst LIKE 'ff%:%'
+	OR CAST(substr(dst, 1, instr(dst, '.') - 1) AS INTEGER) BETWEEN 224 AND 239`
 
 // storeStatus summarises what the store holds, for /api/status, /metrics and -check.
 type storeStatus struct {

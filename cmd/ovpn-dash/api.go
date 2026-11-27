@@ -122,9 +122,16 @@ func (a *api) access(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sum, err := a.store.accessSummary(r.Context(), f)
-	if check(w, r, err) {
-		writeJSON(w, map[string]any{"from": f.from, "to": f.to, "access": list, "summary": sum})
+	if !check(w, r, err) {
+		return
 	}
+	var dests []accessDest
+	if r.URL.Query().Get("dests") == "1" { // a user's details
+		if dests, err = a.store.accessDests(r.Context(), f); !check(w, r, err) {
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"from": f.from, "to": f.to, "access": list, "summary": sum, "destinations": dests})
 }
 
 func (a *api) accessCSV(w http.ResponseWriter, r *http.Request) {
@@ -150,9 +157,12 @@ func (a *api) filter(w http.ResponseWriter, r *http.Request) (filter, bool) {
 		limit = 100
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	port, _ := strconv.Atoi(q.Get("port"))
+	xport, _ := strconv.Atoi(q.Get("xport"))
 	return filter{from: from, to: to, q: strings.TrimSpace(q.Get("q")), server: q.Get("server"), profile: q.Get("profile"), proto: q.Get("proto"),
 		country: q.Get("country"), cn: q.Get("cn"), plat: q.Get("plat"), alerts: q.Get("alerts") == "1", rate: a.alerts.Rate,
-		sort: q.Get("sort"), desc: q.Get("dir") != "asc", limit: min(limit, 500), offset: max(offset, 0)}, ok
+		sort: q.Get("sort"), desc: q.Get("dir") != "asc", limit: min(limit, 500), offset: max(offset, 0),
+		port: max(port, 0), xport: max(xport, 0)}, ok
 }
 
 // check reports a failed query; false means the handler must stop.

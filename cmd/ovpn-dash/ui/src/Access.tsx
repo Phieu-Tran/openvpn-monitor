@@ -10,6 +10,10 @@ import type { Col, Sort } from "./ui";
 
 const ACCESS_PRESETS: Preset[] = ["1h", "24h", "7d", "30d", "90d"];
 
+// HTTPS (443) is most of the rows (browsers open many connections): hidden by default, on its own on demand.
+const WEB = { "Hide 443": { xport: "443" }, "Only 443": { port: "443" }, "All ports": {} } as const;
+type Web = keyof typeof WEB;
+
 export function AccessLog({ server, multi, profiles, agents, linked, onUser }: {
   server: string; multi: boolean; profiles: string[]; agents: Status["agents"]; linked: string | null; onUser: (cn: string) => void;
 }) {
@@ -19,8 +23,10 @@ export function AccessLog({ server, multi, profiles, agents, linked, onUser }: {
   useEffect(() => { if (linked !== null) setQ(linked); }, [linked]); // #access?q=name from a user's details
   const [proto, setProto] = useState("");
   const [sort, setSort] = usePref<Sort>("sort.access", { k: "time", dir: -1 });
+  const [savedWeb, setWeb] = usePref<Web>("access.web", "Hide 443");
+  const web: Web = savedWeb in WEB ? savedWeb : "Hide 443";
   const filters: Filters = { range, q, server, proto, profile: "", country: "", plat: "", alerts: false };
-  const r = usePaged<Access>("api/access", filters, sort);
+  const r = usePaged<Access>("api/access", filters, sort, WEB[web]);
   const s = r.data?.summary;
 
   // agents where the log is not running: say so, with the reason
@@ -61,8 +67,9 @@ export function AccessLog({ server, multi, profiles, agents, linked, onUser }: {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Search value={q} onChange={setQ} placeholder="User, VPN IP, IP or IP:port (e.g. :3389)" className="w-80 max-sm:w-full" />
+          <Segmented label="HTTPS port 443" value={web} options={Object.keys(WEB)} onChange={(v) => setWeb(v as Web)} />
           <Picker label="Protocol" all="TCP + UDP" value={proto} options={["tcp", "udp"]} name={(v) => v.toUpperCase()} onChange={setProto} />
-          <span className="text-xs text-muted">New TCP/UDP connections from VPN clients, counted per user, destination and minute. IP:port only: no URLs, no content.</span>
+          <span className="text-xs text-muted">New TCP/UDP connections from VPN clients, counted per user, destination and minute; connections to the VPN server itself are left out. IP:port only: no URLs, no content.</span>
         </div>
       </Card>
       <Panel title="Access log" flush actions={s && !r.loading && (

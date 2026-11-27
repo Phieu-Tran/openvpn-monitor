@@ -35,7 +35,11 @@ export interface AccessRow {
   server: string; cn: string; profile: string; src: string; dst: string; port: number; proto: string;
   first: string; last: string; n: number;
 }
-export interface Access { access: AccessRow[]; summary: { rows: number; connections: number; users: number; destinations: number } }
+export interface AccessDest { dst: string; port: number; proto: string; connections: number; minutes: number; first: string; last: string }
+export interface Access {
+  access: AccessRow[]; destinations?: AccessDest[] | null;
+  summary: { rows: number; connections: number; users: number; destinations: number };
+}
 export interface CountryUse { country: string; users: number; sessions: number; bytes: number }
 export interface History {
   sessions: SessionRecord[];

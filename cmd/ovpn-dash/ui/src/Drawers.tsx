@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { DayBars, Timeline } from "./charts";
 import { F, addr, appName, bytes, countryName, duration, osName, rangeParams, rate, relative, sum, useDebounced, useJSON } from "./lib";
-import type { Access, Device, LiveRow, SessionRecord, UserDetail, Users } from "./lib";
+import type { Access, AccessDest, Device, LiveRow, SessionRecord, UserDetail, Users } from "./lib";
 import { Badge, CopyButton, CountryTag, DeviceIcon, DeviceTag, ProfileTag, Search, ServerTag } from "./ui";
 
 function Sheet({ title, onClose, children }: { title: ReactNode; onClose: () => void; children: ReactNode }) {
@@ -83,13 +83,35 @@ export function SessionDrawer({ session: s, online, multi, onUser, onClose }: { 
   );
 }
 
+// Dests: one user's destinations, most recent first.
+function Dests({ title, list }: { title: string; list: AccessDest[] }) {
+  if (!list.length) return null;
+  return <>
+    <h4 className="mt-3 mb-1 text-xs font-semibold text-muted">{title}</h4>
+    <ul className="text-sm">
+      {list.slice(0, 15).map((x) => (
+        <li key={`${x.dst}|${x.port}|${x.proto}`} className="flex items-center gap-3 border-b border-border py-1.5">
+          <span className="mono min-w-0 grow break-all font-medium">{addr(x.dst, x.port)} <span className="text-xs font-normal text-muted">{x.proto.toUpperCase()}</span></span>
+          <span className="num text-xs whitespace-nowrap text-muted" title={`first ${F.abs.format(Date.parse(x.first))}`}>
+            {x.connections.toLocaleString("en-GB")} conn · last {relative(Date.parse(x.last))}
+          </span>
+        </li>
+      ))}
+    </ul>
+    {list.length > 15 && <p className="mt-1 text-xs text-muted">and {list.length - 15} more</p>}
+  </>;
+}
+
 const end = (x: SessionRecord) => (x.open ? Date.now() : Date.parse(x.end));
 
 export function UserDrawer({ cn, profiles, multi, onSessions, onAccess, onClose }: {
   cn: string; profiles: string[]; multi: boolean; onSessions: (cn: string) => void; onAccess: (cn: string) => void; onClose: () => void;
 }) {
   const r = useJSON<UserDetail>(`user-${cn}`, detailURL(cn), 30000);
-  const acc = useJSON<Access>(`access-${cn}`, () => `api/access?${new URLSearchParams([...rangeParams({ preset: "30d" }), ["cn", cn], ["limit", "10"]])}`, 60000);
+  // HTTPS 443 apart: browsers open many connections, the rest is what tells who used what
+  const accessURL = (extra: string[][]) => () => `api/access?${new URLSearchParams([...rangeParams({ preset: "30d" }), ["cn", cn], ["dests", "1"], ...extra])}`;
+  const acc = useJSON<Access>(`access-${cn}`, accessURL([["limit", "10"], ["xport", "443"]]), 60000);
+  const web = useJSON<Access>(`access443-${cn}`, accessURL([["limit", "1"], ["port", "443"]]), 60000);
   const d = r.loading ? undefined : r.data;
   const open = d?.sessions.filter((s) => s.open) ?? [];
   const secs = d ? sum(d.sessions, (s) => (end(s) - Date.parse(s.start)) / 1000) : 0;
@@ -127,6 +149,29 @@ export function UserDrawer({ cn, profiles, multi, onSessions, onAccess, onClose 
             <Field label="Real IPs">{d.ips.length >= 100 ? "100+" : d.ips.length} {[...new Set(d.ips.map((p) => p.country ?? ""))].filter(Boolean).map((c) => <CountryTag key={c} cc={c} />)}</Field>
           </dl>
         </Section>
+        <Section title="Access, last 30 days" note="Which IP:port this user opened connections to (access log): IP:port only, no URLs or content.">
+          {!acc.data || !web.data ? <p className="text-sm text-muted">{acc.error || web.error || "Loading…"}</p>
+            : !acc.data.destinations?.length && !web.data.destinations?.length ? (
+              <p className="text-sm text-muted">No connection recorded. The access log covers servers whose agent has OVPN_FLOWS, from the day it was turned on.</p>
+            ) : <>
+              <Dests title={`Destinations, without HTTPS 443 · ${acc.data.summary.connections.toLocaleString("en-GB")} connections`} list={acc.data.destinations ?? []} />
+              {!!acc.data.access.length && <>
+                <h4 className="mt-3 mb-1 text-xs font-semibold text-muted">Latest, without 443</h4>
+                <ul className="text-sm">
+                  {acc.data.access.map((x) => (
+                    <li key={`${x.server}|${x.first}|${x.dst}|${x.port}|${x.proto}`} className="flex items-center gap-3 border-b border-border py-1.5">
+                      <span className="num w-28 shrink-0 text-xs text-muted">{F.dmhm.format(Date.parse(x.first))}</span>
+                      <span className="mono min-w-0 grow break-all">{addr(x.dst, x.port)} <span className="text-xs text-muted">{x.proto.toUpperCase()}</span></span>
+                      {multi && <ServerTag name={x.server} />}
+                      <span className="num text-xs whitespace-nowrap text-muted">×{x.n}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>}
+              <Dests title={`HTTPS 443 · ${web.data.summary.connections.toLocaleString("en-GB")} connections`} list={web.data.destinations ?? []} />
+              <Button size="sm" variant="secondary" className="mt-2" onPress={() => onAccess(cn)}>All access of {cn}</Button>
+            </>}
+        </Section>
         <Section title={`Devices (${d.devices.length})`} note={NOTE}>
           {!d.devices.length ? <p className="text-sm text-muted">None reported yet.</p> : (
             <ul className="text-sm">
@@ -158,21 +203,6 @@ export function UserDrawer({ cn, profiles, multi, onSessions, onAccess, onClose 
             ))}
           </ul>
         </Section>
-        {!!acc.data?.access.length && (
-          <Section title="Recent access" note="New connections to IP:port, per minute (access log).">
-            <ul className="text-sm">
-              {acc.data.access.map((x) => (
-                <li key={`${x.server}|${x.first}|${x.dst}|${x.port}|${x.proto}`} className="flex items-center gap-3 border-b border-border py-1.5">
-                  <span className="num w-28 shrink-0 text-xs text-muted">{F.dmhm.format(Date.parse(x.first))}</span>
-                  <span className="mono min-w-0 grow break-all">{addr(x.dst, x.port)} <span className="text-xs text-muted">{x.proto.toUpperCase()}</span></span>
-                  {multi && <ServerTag name={x.server} />}
-                  <span className="num text-xs whitespace-nowrap text-muted">×{x.n}</span>
-                </li>
-              ))}
-            </ul>
-            <Button size="sm" variant="ghost" className="mt-1" onPress={() => onAccess(cn)}>All access of {cn}</Button>
-          </Section>
-        )}
         <Section title="Online times, last 14 days"><Timeline sessions={d.sessions} /></Section>
         <Section title="Traffic per day (by session start)"><DayBars days={d.days} /></Section>
         <Section title="Real IPs">

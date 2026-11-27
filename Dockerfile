@@ -1,5 +1,5 @@
 # One Dockerfile for all binaries:
-#   docker build --build-arg APP=ovpn-agent --build-arg VERSION=0.1.7 -t vihat/ovpn-agent:0.1.7 .
+#   docker build --build-arg APP=ovpn-agent --build-arg VERSION=0.1.8 -t vihat/ovpn-agent:0.1.8 .
 
 # The dashboard page (React + HeroUI), embedded into ovpn-dash by go:embed.
 # Static files are the same on every platform, so build them on the build machine's.

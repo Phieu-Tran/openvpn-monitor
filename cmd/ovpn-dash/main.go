@@ -357,10 +357,12 @@ func (p *poller) poll() {
 			state = "on"
 		}
 		if flowErrs[i] == nil {
-			if err := p.store.addFlows(sv.name, flows[i].Flows); err != nil {
+			if err := p.store.addFlows(sv.name, flows[i].Flows, flows[i].Skip, now); err != nil {
 				p.store.failed(fmt.Errorf("access log: %w", err))
-			} else if n := len(flows[i].Flows); n > 0 {
-				last = flows[i].Flows[n-1].T
+			} else {
+				for _, f := range flows[i].Flows {
+					last = max(last, f.T)
+				}
 			}
 		}
 		p.mu.Lock()
@@ -377,6 +379,7 @@ type flowsResp struct {
 	Enabled bool        `json:"enabled"`
 	Error   string      `json:"error"`
 	Dropped uint64      `json:"dropped"`
+	Skip    []string    `json:"skip"` // destinations the agent leaves out (agent 0.1.8)
 	Flows   []agentFlow `json:"flows"`
 }
 

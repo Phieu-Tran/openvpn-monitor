@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -72,21 +75,40 @@ func TestFlowLog(t *testing.T) {
 		t.Error("bad subnet accepted")
 	}
 	l := newFlowLog(nets)
+	l.addrs = func() ([]net.Addr, error) { // this host: the tun gateway and the LAN address
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("10.9.0.1"), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.ParseIP("192.0.2.3"), Mask: net.CIDRMask(23, 32)}}, nil
+	}
+	l.readLocal()
 	m := time.Unix(1_800_000_000, 0).Truncate(time.Minute) // 14:00:00
 	ip := netip.MustParseAddr
 	for _, s := range []int{5, 12, 59} {
 		l.add(m.Add(time.Duration(s)*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 445, 6)
 	}
-	l.add(m.Add(70*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 445, 6)    // next minute
-	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 445, 17)    // udp: another row
+	l.add(m.Add(70*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 445, 6)   // next minute
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 445, 17)   // udp: another row
 	l.add(m.Add(3*time.Second), ip("198.51.100.2"), ip("192.0.2.10"), 22, 6) // not a VPN client (tun0)
-	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 0, 1)       // ICMP
-	if l.events.Load() != 5 {
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.2.10"), 0, 1)      // ICMP
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("10.9.0.1"), 53, 17)      // the VPN server itself (DNS on its tun)
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.2.3"), 22, 6)      // the VPN host's LAN address
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("10.9.0.255"), 137, 17)   // broadcast of the /24 tun subnet
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.3.255"), 138, 17)  // broadcast of the /23 LAN
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("192.0.2.255"), 80, 17)   // inside the /23: a host, kept
+	l.add(m.Add(3*time.Second), ip("10.9.0.6"), ip("224.0.0.251"), 5353, 17) // multicast (mDNS)
+	if strings.Join(l.skipped(), " ") != "10.9.0.1 10.9.0.255 192.0.2.3 192.0.3.255" {
+		t.Errorf("skipped: %v", l.skipped())
+	}
+	if l.events.Load() != 6 {
 		t.Errorf("events = %d", l.events.Load())
 	}
 
 	got := l.closed(0, m.Add(90*time.Second)) // minute 2 still running
-	if len(got) != 2 || got[0].Proto != "tcp" && got[1].Proto != "tcp" {
+	dsts := []string{}
+	for _, f := range got {
+		dsts = append(dsts, fmt.Sprintf("%s:%d/%s", f.Dst, f.Port, f.Proto))
+	}
+	slices.Sort(dsts)
+	if strings.Join(dsts, " ") != "192.0.2.10:445/tcp 192.0.2.10:445/udp 192.0.2.255:80/udp" {
 		t.Fatalf("closed: %+v", got)
 	}
 	for _, f := range got {
@@ -121,7 +143,7 @@ func TestFlowLog(t *testing.T) {
 	if st := get(l, "/api/v1/flows?since=0"); !st.Enabled || len(st.Flows) != 1 || st.Flows[0].Dst != "192.0.2.53" {
 		t.Errorf("on: %+v", st)
 	}
-	if !strings.Contains(l.metrics(), "ovpn_agent_flow_events_total 6") {
+	if !strings.Contains(l.metrics(), "ovpn_agent_flow_events_total 7") {
 		t.Errorf("metrics: %s", l.metrics())
 	}
 }

@@ -9,7 +9,7 @@ name: ovpn-dash
 
 services:
   dash:
-    image: vihat/ovpn-dash:0.1.7
+    image: vihat/ovpn-dash:0.1.8
     restart: unless-stopped
     environment:
       OVPN_LISTEN: ":8080"
