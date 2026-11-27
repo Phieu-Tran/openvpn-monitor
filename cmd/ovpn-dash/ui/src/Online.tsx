@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Heatmap, Legend, Sparkline, TimeChart, seriesColor } from "./charts";
 import { F, M, H, PRESETS, appName, bytes, countryName, duration, osName, rangeKey, rangeParams, rate, relative, sum, useJSON, usePref, addr } from "./lib";
 import type { Heat, Live, LiveRow, Preset, Series } from "./lib";
-import { Badge, ColumnMenu, CountryTag, DataTable, DeviceTag, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
+import { Badge, ColumnMenu, CountryCards, CountryTag, DataTable, DeviceTag, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
 const CHART_PRESETS: Preset[] = ["5m", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d", "30d", "90d"];
@@ -49,7 +49,8 @@ export function Online({ live, error, alertRate, profiles, server, multi, onSess
   const [q, setQ] = useState("");
   const [profile, setProfile] = useState("");
   const [onlyAlerts, setOnlyAlerts] = useState(false);
-  useEffect(() => setProfile(""), [server]); // the profile may not exist on the other server
+  const [country, setCountry] = useState("");
+  useEffect(() => { setProfile(""); setCountry(""); }, [server]); // may not exist on the other server
   const [sort, setSort] = usePref<Sort>("sort.online", { k: "profile", dir: 1 });
   const [hidden, setHidden] = usePref<string[]>("hidden.online", ["since", "cipher"]);
 
@@ -83,10 +84,21 @@ export function Online({ live, error, alertRate, profiles, server, multi, onSess
     : profiles.filter((p) => points.some((x) => x.online[p])).map((p) => ({ name: p, color: seriesColor(profiles.indexOf(p)), v: (x: P) => x.online[p] ?? 0 }));
   const empty = series.error || (series.loading ? "Loading…" : "No data yet — one sample is recorded per minute");
 
+  // who connects from where, right now
+  const perCountry = new Map<string, { users: Set<string>; sessions: number }>();
+  for (const s of all) {
+    const c = perCountry.get(s.country ?? "") ?? { users: new Set(), sessions: 0 };
+    c.users.add(s.cn);
+    c.sessions++;
+    perCountry.set(s.country ?? "", c);
+  }
+  const countries = [...perCountry].map(([cc, c]) => ({ country: cc, users: c.users.size, sessions: c.sessions }))
+    .sort((a, b) => b.users - a.users || b.sessions - a.sessions);
+
   const needle = q.trim().toLowerCase();
   const cmpKey = sortKeys[sort.k] ?? sortKeys.cn;
   const rows = all
-    .filter((s) => (!profile || s.profile === profile) && (!onlyAlerts || alerting(s)) && (!needle ||
+    .filter((s) => (!profile || s.profile === profile) && (!country || s.country === country) && (!onlyAlerts || alerting(s)) && (!needle ||
       [s.cn, s.vpn_ip, s.vpn_ip6, s.real_ip, s.server, s.profile, s.country, s.country && countryName(s.country), s.device?.plat && osName(s.device), appName(s.device)].some((v) => v?.toLowerCase().includes(needle))))
     .sort((a, b) => {
       const x = cmpKey(a), y = cmpKey(b);
@@ -207,6 +219,12 @@ export function Online({ live, error, alertRate, profiles, server, multi, onSess
         </div>
       </Panel>
 
+      {live && all.length > 0 && (
+        <Panel title="Connecting from" actions={<span className="text-xs text-muted">country of the real IP, online now{country && " · a card filters the sessions below"}</span>}>
+          <CountryCards items={countries} value={country} onPick={setCountry} stale={!!error} />
+        </Panel>
+      )}
+
       <Panel title="Sessions" flush actions={<>
         <Toggle label="Alerts only" value={onlyAlerts} onChange={setOnlyAlerts} />
         <Search value={q} onChange={setQ} placeholder={multi ? "CN, IP, country, server, profile or device" : "CN, IP, country, profile or device"} />
@@ -221,7 +239,7 @@ export function Online({ live, error, alertRate, profiles, server, multi, onSess
           rowId={(s) => `${s.server}|${s.instance}|${s.cid}|${s.connected_since}`} sort={sort} onSort={setSort}
           descFirst={["dur", "traffic", "rate", "seen", "since"]}
           rowClass={(s) => `${alerting(s) ? "row-alert" : copies(s) > 1 ? "row-warn" : ""}${stale(s) ? " stale" : ""}`} onRow={onSession}
-          empty={!live ? (error ? "No data" : "Loading…") : q || profile || onlyAlerts ? "No session matches the filter" : "Nobody is online"} />
+          empty={!live ? (error ? "No data" : "Loading…") : q || profile || country || onlyAlerts ? "No session matches the filter" : "Nobody is online"} />
       </Panel>
 
       <Panel title="Usual load by weekday and hour" actions={<Segmented label="Heatmap range" value={heatDays} options={["7d", "30d", "90d"]} onChange={(v) => setHeatDays(v as "7d")} />}>

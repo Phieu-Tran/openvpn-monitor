@@ -3,7 +3,7 @@ import { Button, Card, DateField, DateRangePicker, Pagination, RangeCalendar } f
 import { useEffect, useState } from "react";
 import { F, PRESETS, TZ, addr, appName, bytes, countryName, duration, platName, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
 import type { DeviceUse, Facets, History, Preset, Range, SessionRecord, UserRow, Users } from "./lib";
-import { Badge, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
+import { Badge, CountryCards, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
 // server is chosen in the bar above every view, not in the filter bar.
@@ -169,6 +169,12 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
   return (
     <div className="grid min-w-0 gap-4">
       <FilterBar filters={filters} set={setFilters} facets={facets} csv={{ label: "Export sessions CSV", url: r.csvURL }} />
+      {r.data && (
+        <Panel title="Countries" actions={<span className="text-xs text-muted">of the real IP (offline GeoIP database), users who connected in this range</span>}>
+          {r.data.countries.length ? <CountryCards items={r.data.countries} value={filters.country} stale={r.loading} onPick={(country) => setFilters({ ...filters, country })} />
+            : <p className="text-sm text-muted">No sessions in this range.</p>}
+        </Panel>
+      )}
       <Devices list={r.data?.devices} plat={filters.plat} loading={r.loading} onPlat={(plat) => setFilters({ ...filters, plat })} />
       <Panel title="Sessions" flush actions={s && !r.loading && (
         <span className="num text-sm text-muted">

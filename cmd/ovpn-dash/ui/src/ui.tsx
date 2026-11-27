@@ -5,7 +5,7 @@ import {
 import type { ReactNode } from "react";
 import { siAndroid, siApple, siLinux } from "simple-icons";
 import { seriesColor } from "./charts";
-import { appName, countryName, flagEmoji, osName, platName } from "./lib";
+import { appName, bytes, countryName, flagEmoji, osName, platName } from "./lib";
 import type { Device } from "./lib";
 
 // A profile keeps one colour everywhere (charts, tags, row accents): its position in the
@@ -203,6 +203,39 @@ export function CountryTag({ cc }: { cc?: string }) {
     <span className="mr-2 inline-flex items-center gap-1 text-xs font-semibold text-muted" title={countryName(cc)}>
       <span className="flag text-[15px] leading-none">{flagEmoji(cc)}</span>{cc}
     </span>
+  );
+}
+
+// CountryCards: users and sessions per country (of the real IP), most users first, with the
+// share of sessions as a bar. A card picks that country; again clears it. "" = unknown.
+export function CountryCards({ items, value, onPick, stale }: {
+  items: { country: string; users: number; sessions: number; bytes?: number }[]; value: string; onPick: (cc: string) => void; stale?: boolean;
+}) {
+  const total = items.reduce((a, c) => a + c.sessions, 0) || 1;
+  return (
+    <ul className={`grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-2 ${stale ? "stale" : ""}`}>
+      {items.map((c) => {
+        const pct = (c.sessions / total) * 100;
+        const name = !c.country ? "Unknown" : c.country === "LAN" ? "LAN (private)" : countryName(c.country);
+        return (
+          <li key={c.country || "?"}>
+            <button type="button" aria-pressed={value === c.country} disabled={!c.country} title={c.country ? `${name}: show only these` : "No country for these IPs"}
+              onClick={() => onPick(value === c.country ? "" : c.country)}
+              className={`grid w-full gap-1.5 rounded-xl border px-3 py-2 text-left transition-colors enabled:cursor-pointer ${value === c.country ? "border-accent bg-accent-soft" : "border-border enabled:hover:bg-default"}`}>
+              <span className="flex items-center gap-2">
+                <span className="flag w-6 text-xl leading-none">{c.country && c.country !== "LAN" ? flagEmoji(c.country) : ""}</span>
+                <span className="min-w-0 grow truncate text-sm font-medium">{name}</span>
+                <b className="num text-sm">{c.users}</b>
+              </span>
+              <span className="h-1 overflow-hidden rounded-full bg-default"><span className="block h-full rounded-full bg-accent" style={{ width: `${pct}%` }} /></span>
+              <span className="num text-xs text-muted">
+                {c.users} {c.users === 1 ? "user" : "users"} · {c.sessions} {c.sessions === 1 ? "session" : "sessions"} ({pct < 1 ? "<1" : Math.round(pct)}%){c.bytes !== undefined && ` · ${bytes(c.bytes)}`}
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

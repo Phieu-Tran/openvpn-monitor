@@ -152,7 +152,11 @@ func (a *api) history(w http.ResponseWriter, r *http.Request) {
 	if !check(w, r, err) {
 		return
 	}
-	writeJSON(w, map[string]any{"from": f.from, "to": f.to, "sessions": list, "summary": sum, "devices": devices})
+	countries, err := a.store.countryUses(r.Context(), f)
+	if !check(w, r, err) {
+		return
+	}
+	writeJSON(w, map[string]any{"from": f.from, "to": f.to, "sessions": list, "summary": sum, "devices": devices, "countries": countries})
 }
 
 func (a *api) users(w http.ResponseWriter, r *http.Request) {

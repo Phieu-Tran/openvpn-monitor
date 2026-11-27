@@ -64,6 +64,14 @@ func TestTwoServers(t *testing.T) {
 			t.Errorf("u1 servers: %v", u.Servers)
 		}
 	}
+	// a's u1 and b's u1 are the same CN: one user, two sessions
+	if err := s.fillCountries(func(ip string) string { return map[string]string{"203.0.113.2": "KH"}[ip] }); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.countryUses(ctx, all); err != nil || len(got) != 2 || got[0].Country != "" || got[0].Users != 1 || got[0].Sessions != 2 ||
+		got[1].Country != "KH" || got[1].Users != 1 || got[1].Bytes != 600 {
+		t.Errorf("countries: %+v %v", got, err)
+	}
 	if fc, _ := s.facets(ctx); strings.Join(fc.Servers, ",") != "a,b" {
 		t.Errorf("facets: %+v", fc)
 	}

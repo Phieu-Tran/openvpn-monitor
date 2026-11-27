@@ -465,6 +465,38 @@ func (s *store) facets(ctx context.Context) (facets, error) {
 	return out, nil
 }
 
+// countryUse is one country (of the real IP) in the filtered sessions; "" = unknown.
+type countryUse struct {
+	Country  string `json:"country"`
+	Users    int    `json:"users"`
+	Sessions int    `json:"sessions"`
+	Bytes    uint64 `json:"bytes"`
+}
+
+// countryUses counts users, sessions and traffic per country, most users first.
+func (s *store) countryUses(ctx context.Context, f filter) ([]countryUse, error) {
+	where, args := f.where(time.Now())
+	if f.alerts {
+		where += " AND peak > ?"
+		args = append(args, f.threshold())
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT country, count(DISTINCT cn), count(*), sum(bytes_rx + bytes_tx)
+		FROM sessions`+where+` GROUP BY country ORDER BY count(DISTINCT cn) DESC, count(*) DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []countryUse{}
+	for rows.Next() {
+		var c countryUse
+		if err := rows.Scan(&c.Country, &c.Users, &c.Sessions, &c.Bytes); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // deviceUse is one kind of device (OS + app) seen in the filtered sessions.
 type deviceUse struct {
 	Plat     string    `json:"plat"`

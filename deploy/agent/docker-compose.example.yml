@@ -10,7 +10,7 @@ name: ovpn-agent
 
 services:
   agent:
-    image: vihat/ovpn-agent:0.1.5
+    image: vihat/ovpn-agent:0.1.6
     restart: unless-stopped
     network_mode: host
     # uid 0 only to enter data/run (drwx------ root). cap_drop ALL leaves root with

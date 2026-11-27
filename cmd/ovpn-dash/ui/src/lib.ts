@@ -30,9 +30,11 @@ export interface SessionRecord {
   open?: boolean; country?: string; device?: Device;
 }
 export interface DeviceUse { plat: string; gui?: string; ver?: string; users: number; sessions: number; last: string }
+export interface CountryUse { country: string; users: number; sessions: number; bytes: number }
 export interface History {
   sessions: SessionRecord[];
   devices: DeviceUse[];
+  countries: CountryUse[];
   summary: { total: number; users: number; online_seconds: number; bytes_rx: number; bytes_tx: number; alerts: number };
 }
 export interface UserRow {
