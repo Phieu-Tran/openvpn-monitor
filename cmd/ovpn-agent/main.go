@@ -12,8 +12,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"ovpn-dash/internal/app"
@@ -28,6 +30,7 @@ func main() {
 	listen := flag.String("listen", app.Env("OVPN_LISTEN", "127.0.0.1:9177"), "listen address [$OVPN_LISTEN] (production: this host's LAN IP:9177, never 0.0.0.0)")
 	root := flag.String("root", app.Env("OVPN_ROOT", "/srv/ovpn"), "directory holding <profile>/mgmt-<proto>.sock [$OVPN_ROOT]")
 	tokenFile := flag.String("token-file", app.Env("OVPN_TOKEN_FILE", "/data/agent.token"), "file containing the bearer token [$OVPN_TOKEN_FILE]")
+	flowNets := flag.String("flows", app.Env("OVPN_FLOWS", ""), "access log: VPN client subnets, e.g. 10.8.0.0/16; needs cap_add NET_ADMIN; empty = off [$OVPN_FLOWS]")
 	interval := flag.Duration("interval", 5*time.Second, "poll interval")
 	timeout := flag.Duration("timeout", 3*time.Second, "per-instance management timeout")
 	dump := flag.String("dump", "", "print the raw 'status 3' output of this socket once and exit")
@@ -35,6 +38,10 @@ func main() {
 	healthcheck := flag.Bool("healthcheck", false, "exit 0 if this agent answers /healthz (Docker HEALTHCHECK)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	nets, err := parseNets(*flowNets)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	switch {
 	case *showVersion:
@@ -43,7 +50,7 @@ func main() {
 	case *healthcheck:
 		app.Healthcheck(*listen)
 	case *check:
-		selfCheck(*listen, *root, *tokenFile, *timeout)
+		selfCheck(*listen, *root, *tokenFile, *timeout, nets)
 	case *dump != "":
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
@@ -56,6 +63,15 @@ func main() {
 	}
 
 	log.Printf("ovpn-agent %s", version)
+	var flows *flowLog
+	if len(nets) > 0 {
+		flows = newFlowLog(nets)
+		if err := startFlows(flows); err != nil {
+			log.Printf("access log off: %v", err) // reported by /api/v1/flows and -check
+		} else {
+			log.Printf("access log: new connections from %v", nets)
+		}
+	}
 	token, err := app.ReadToken(*tokenFile)
 	if err != nil {
 		log.Fatal(err)
@@ -70,7 +86,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           p.handler(token),
+		Handler:           p.handler(token, flows),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -80,7 +96,7 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func (p *poller) handler(token string) http.Handler {
+func (p *poller) handler(token string, flows *flowLog) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	mux.Handle("GET /api/v1/sessions", auth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +106,14 @@ func (p *poller) handler(token string) http.Handler {
 	mux.Handle("GET /metrics", auth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		w.Write(p.snap.Load().metrics)
+		io.WriteString(w, flows.metrics())
 		io.WriteString(w, app.RuntimeMetrics())
+	})))
+	// ?since=<unix seconds>: the minutes after it that are over (the dash passes the last one it has).
+	mux.Handle("GET /api/v1/flows", auth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(flows.status(since, time.Now()))
 	})))
 	return mux
 }
@@ -109,7 +132,7 @@ func auth(token string, h http.Handler) http.Handler {
 
 // selfCheck verifies what a fresh install needs: token, mounted sockets, each
 // OpenVPN instance answering, and the running agent's API (auth included).
-func selfCheck(listen, root, tokenFile string, timeout time.Duration) {
+func selfCheck(listen, root, tokenFile string, timeout time.Duration, nets []netip.Prefix) {
 	var c app.Checker
 	fmt.Printf("ovpn-agent %s self-check\n\n", version)
 	var token string
@@ -166,6 +189,33 @@ func selfCheck(listen, root, tokenFile string, timeout time.Duration) {
 		}
 		return fmt.Sprintf("%d/%d instances up", up, len(r.Instances)), nil
 	})
+	if len(nets) > 0 {
+		c.Run(fmt.Sprintf("access log: conntrack events from %v for 5s", nets), func() (string, error) {
+			fd, err := listenCT()
+			if err != nil {
+				return "", err
+			}
+			l := newFlowLog(nets)
+			if err := l.capture(fd, time.Now().Add(5*time.Second)); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%d new connections from VPN clients (0 is fine when nobody is working)", l.events.Load()), nil
+		})
+		c.Run("GET /api/v1/flows", func() (string, error) {
+			code, body, err := app.Get(base+"/api/v1/flows", token)
+			if err != nil || code != 200 {
+				return "", fmt.Errorf("status %d %v (agent older than 0.1.7?)", code, err)
+			}
+			var st flowStatus
+			if err := json.Unmarshal(body, &st); err != nil {
+				return "", err
+			}
+			if !st.Enabled || st.Error != "" {
+				return "", fmt.Errorf("running agent: enabled=%v %s", st.Enabled, st.Error)
+			}
+			return fmt.Sprintf("%d connections seen since start, %d lost", st.Events, st.Dropped), nil
+		})
+	}
 	c.Exit()
 }
 

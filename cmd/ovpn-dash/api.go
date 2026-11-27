@@ -107,6 +107,38 @@ func (a *api) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/series", a.series)
 	mux.HandleFunc("GET /api/heatmap", a.heatmap)
 	mux.HandleFunc("GET /api/facets", a.facets)
+	mux.HandleFunc("GET /api/access", a.access)
+	mux.HandleFunc("GET /api/access.csv", a.accessCSV)
+}
+
+func (a *api) access(w http.ResponseWriter, r *http.Request) {
+	f, ok := a.filter(w, r)
+	if !ok {
+		return
+	}
+	list := []access{}
+	err := a.store.eachAccess(r.Context(), f, func(x access) error { list = append(list, x); return nil })
+	if !check(w, r, err) {
+		return
+	}
+	sum, err := a.store.accessSummary(r.Context(), f)
+	if check(w, r, err) {
+		writeJSON(w, map[string]any{"from": f.from, "to": f.to, "access": list, "summary": sum})
+	}
+}
+
+func (a *api) accessCSV(w http.ResponseWriter, r *http.Request) {
+	f, ok := a.filter(w, r)
+	if !ok {
+		return
+	}
+	f.limit, f.offset = -1, 0
+	exportCSV(w, r, fileName("access", f), []string{"first", "last", "cn", "profile", "server", "vpn_ip", "dst", "port", "proto", "connections"},
+		func(write func(...string) error) error {
+			return a.store.eachAccess(r.Context(), f, func(x access) error {
+				return write(csvTime(x.First), csvTime(x.Last), x.CN, x.Profile, x.Server, x.Src, x.Dst, strconv.Itoa(x.Port), x.Proto, strconv.Itoa(x.N))
+			})
+		})
 }
 
 // filter reads the range, filters, sort order and page from the query string.

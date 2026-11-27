@@ -198,6 +198,9 @@ type server struct {
 	lastErr      string
 	version      string
 	last         []agentInstance // last good answer: still shown while the agent is unreachable
+	flowsSince   int64           // last access-log minute stored
+	flows        string          // access log on the agent: "" unknown, "off", "on", or what is wrong
+	flowsDropped uint64
 }
 
 // parseAgents reads OVPN_AGENT: "http://a:9177" or "hn=http://a:9177,hcm=http://b:9177".
@@ -263,9 +266,21 @@ func (p *poller) poll() {
 	now := time.Now()
 	resps := make([]agentResp, len(p.servers))
 	errs := make([]error, len(p.servers))
+	flows := make([]flowsResp, len(p.servers))
+	flowErrs := make([]error, len(p.servers))
+	since := make([]int64, len(p.servers))
+	p.mu.Lock()
+	for i, sv := range p.servers {
+		since[i] = sv.flowsSince
+	}
+	p.mu.Unlock()
 	var wg sync.WaitGroup
 	for i, sv := range p.servers {
-		wg.Go(func() { resps[i], errs[i] = p.fetch(sv) })
+		wg.Go(func() {
+			if resps[i], errs[i] = p.fetch(sv); errs[i] == nil {
+				flows[i], flowErrs[i] = p.fetchFlows(sv, since[i])
+			}
+		})
 	}
 	wg.Wait()
 
@@ -321,9 +336,71 @@ func (p *poller) poll() {
 		p.code, p.body = fail(strings.Join(failed, "; "))
 	}
 	p.mu.Unlock()
-	if anyOK {
-		p.store.observe(fresh, now)
+	if !anyOK {
+		return
 	}
+	p.store.observe(fresh, now)
+	// The access log, after the sessions: a connection's user is the session that had its VPN IP.
+	for i, sv := range p.servers {
+		if errs[i] != nil {
+			continue
+		}
+		state, last := "", since[i]
+		switch fr := flows[i]; {
+		case flowErrs[i] != nil:
+			state = flowErrs[i].Error()
+		case !fr.Enabled:
+			state = "off"
+		case fr.Error != "":
+			state = fr.Error
+		default:
+			state = "on"
+		}
+		if flowErrs[i] == nil {
+			if err := p.store.addFlows(sv.name, flows[i].Flows); err != nil {
+				p.store.failed(fmt.Errorf("access log: %w", err))
+			} else if n := len(flows[i].Flows); n > 0 {
+				last = flows[i].Flows[n-1].T
+			}
+		}
+		p.mu.Lock()
+		if state != sv.flows && sv.flows != "" {
+			log.Printf("agent %s: access log %s", sv.name, state)
+		}
+		sv.flows, sv.flowsSince, sv.flowsDropped = state, last, flows[i].Dropped
+		p.mu.Unlock()
+	}
+}
+
+// flowsResp is ovpn-agent /api/v1/flows.
+type flowsResp struct {
+	Enabled bool        `json:"enabled"`
+	Error   string      `json:"error"`
+	Dropped uint64      `json:"dropped"`
+	Flows   []agentFlow `json:"flows"`
+}
+
+// fetchFlows gets the access-log minutes after since; an agent older than 0.1.7 has none (off).
+func (p *poller) fetchFlows(sv *server, since int64) (flowsResp, error) {
+	var r flowsResp
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/flows?since=%d", sv.base, since), nil)
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return r, fmt.Errorf("access log: %v", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return r, nil
+	default:
+		return r, errors.New("access log: agent returned " + resp.Status)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&r); err != nil {
+		return r, fmt.Errorf("access log: decoding: %v", err)
+	}
+	return r, nil
 }
 
 type agentStatus struct {
@@ -335,6 +412,8 @@ type agentStatus struct {
 	Version   string    `json:"version,omitempty"`
 	Polls     uint64    `json:"polls"`
 	PollFails uint64    `json:"poll_fails"`
+	Flows     string    `json:"flows,omitempty"` // access log: off, on, or what is wrong
+	FlowsLost uint64    `json:"flows_dropped,omitempty"`
 }
 
 func (p *poller) status() []agentStatus {
@@ -343,7 +422,7 @@ func (p *poller) status() []agentStatus {
 	out := []agentStatus{}
 	for _, sv := range p.servers {
 		out = append(out, agentStatus{Name: sv.name, URL: sv.base, OK: sv.ok, Error: sv.lastErr, LastOK: sv.lastOK,
-			Version: sv.version, Polls: sv.polls, PollFails: sv.fails})
+			Version: sv.version, Polls: sv.polls, PollFails: sv.fails, Flows: sv.flows, FlowsLost: sv.flowsDropped})
 	}
 	return out
 }
@@ -419,6 +498,7 @@ func metrics(agents []agentStatus, s storeStatus) string {
 	g("ovpn_dash_history_sessions", "gauge", "Closed sessions kept in history.", s.Sessions)
 	g("ovpn_dash_open_sessions", "gauge", "Sessions in progress.", s.Open)
 	g("ovpn_dash_samples", "gauge", "Per-minute chart samples kept.", s.Samples)
+	g("ovpn_dash_access_rows", "gauge", "Access log rows kept (client, destination, minute).", s.Flows)
 	g("ovpn_dash_data_bytes", "gauge", "Size of the history database on disk.", s.DataBytes)
 	g("ovpn_dash_data_max_bytes", "gauge", "Size cap of the history database; 0 = none.", s.MaxBytes)
 	g("ovpn_dash_history_write_errors_total", "counter", "Failed writes to the data directory since start.", s.WriteErrors)

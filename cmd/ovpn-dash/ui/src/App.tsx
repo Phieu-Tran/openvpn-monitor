@@ -1,5 +1,6 @@
 import { Alert, Button, Meter, Toast } from "@heroui/react";
 import { useEffect, useState } from "react";
+import { AccessLog } from "./Access";
 import { QuickSearch, SessionDrawer, UserDrawer } from "./Drawers";
 import { Sessions, UserList } from "./History";
 import type { Filters } from "./History";
@@ -12,6 +13,7 @@ const VIEWS = [
   { id: "online", label: "Online", icon: "online" },
   { id: "history", label: "History", icon: "history" },
   { id: "users", label: "Users", icon: "users" },
+  { id: "access", label: "Access log", icon: "log" },
 ] as const;
 
 type Theme = "system" | "light" | "dark";
@@ -45,7 +47,7 @@ const Banner = ({ tone, children }: { tone: "danger" | "warning"; children: stri
 
 export function App() {
   const { path, query } = useHash();
-  const view = path === "history" || path === "users" ? path : "online";
+  const view = path === "history" || path === "users" || path === "access" ? path : "online";
   const [theme, setTheme] = useTheme();
   const [narrow, setNarrow] = usePref("nav.narrow", false);
 
@@ -65,7 +67,7 @@ export function App() {
   const setFilters = (f: Filters) => { setFilterState(f); if ("preset" in f.range) setPreset(f.range.preset); };
   // links like #history?q=name set the search box
   const linked = query.get("q");
-  useEffect(() => { if (linked !== null) setFilterState((f) => ({ ...f, q: linked })); }, [linked]);
+  useEffect(() => { if (linked !== null && path === "history") setFilterState((f) => ({ ...f, q: linked })); }, [linked, path]);
 
   const [session, setSession] = useState<LiveRow>();
   const [user, setUser] = useState("");
@@ -76,6 +78,7 @@ export function App() {
     setFilterState((f) => ({ ...f, q: cn })); // the hash may not change if it already names this user
     location.hash = "#history?q=" + encodeURIComponent(cn);
   };
+  const showAccess = (cn: string) => { setUser(""); location.hash = "#access?q=" + encodeURIComponent(cn); };
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setFinding(true); }
@@ -177,6 +180,8 @@ export function App() {
           {view === "online" && <Online live={live.data} error={live.error} alertRate={alertRate} profiles={profiles} server={server} multi={multi} onSession={setSession} />}
           {view === "history" && <Sessions {...props} />}
           {view === "users" && <UserList {...props} />}
+          {view === "access" && <AccessLog server={server} multi={multi} profiles={profiles} agents={status.data?.agents ?? []}
+            linked={path === "access" ? linked : null} onUser={openUser} />}
         </main>
 
         <footer className="mx-auto mt-auto w-full max-w-[1600px] px-4 pb-5 text-xs text-muted">
@@ -195,7 +200,7 @@ export function App() {
       </div>
 
       {session && <SessionDrawer session={current ?? session} online={!!current || !!live.error} multi={multi} onUser={openUser} onClose={() => setSession(undefined)} />}
-      {user && <UserDrawer cn={user} profiles={profiles} multi={multi} onSessions={showSessions} onClose={() => setUser("")} />}
+      {user && <UserDrawer cn={user} profiles={profiles} multi={multi} onSessions={showSessions} onAccess={showAccess} onClose={() => setUser("")} />}
       {finding && <QuickSearch live={rows} multi={multi} onUser={openUser} onClose={() => setFinding(false)} />}
     </div>
   );

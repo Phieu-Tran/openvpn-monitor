@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { DayBars, Timeline } from "./charts";
 import { F, addr, appName, bytes, countryName, duration, osName, rangeParams, rate, relative, sum, useDebounced, useJSON } from "./lib";
-import type { Device, LiveRow, SessionRecord, UserDetail, Users } from "./lib";
+import type { Access, Device, LiveRow, SessionRecord, UserDetail, Users } from "./lib";
 import { Badge, CopyButton, CountryTag, DeviceIcon, DeviceTag, ProfileTag, Search, ServerTag } from "./ui";
 
 function Sheet({ title, onClose, children }: { title: ReactNode; onClose: () => void; children: ReactNode }) {
@@ -85,8 +85,11 @@ export function SessionDrawer({ session: s, online, multi, onUser, onClose }: { 
 
 const end = (x: SessionRecord) => (x.open ? Date.now() : Date.parse(x.end));
 
-export function UserDrawer({ cn, profiles, multi, onSessions, onClose }: { cn: string; profiles: string[]; multi: boolean; onSessions: (cn: string) => void; onClose: () => void }) {
+export function UserDrawer({ cn, profiles, multi, onSessions, onAccess, onClose }: {
+  cn: string; profiles: string[]; multi: boolean; onSessions: (cn: string) => void; onAccess: (cn: string) => void; onClose: () => void;
+}) {
   const r = useJSON<UserDetail>(`user-${cn}`, detailURL(cn), 30000);
+  const acc = useJSON<Access>(`access-${cn}`, () => `api/access?${new URLSearchParams([...rangeParams({ preset: "30d" }), ["cn", cn], ["limit", "10"]])}`, 60000);
   const d = r.loading ? undefined : r.data;
   const open = d?.sessions.filter((s) => s.open) ?? [];
   const secs = d ? sum(d.sessions, (s) => (end(s) - Date.parse(s.start)) / 1000) : 0;
@@ -155,6 +158,21 @@ export function UserDrawer({ cn, profiles, multi, onSessions, onClose }: { cn: s
             ))}
           </ul>
         </Section>
+        {!!acc.data?.access.length && (
+          <Section title="Recent access" note="New connections to IP:port, per minute (access log).">
+            <ul className="text-sm">
+              {acc.data.access.map((x) => (
+                <li key={`${x.server}|${x.first}|${x.dst}|${x.port}|${x.proto}`} className="flex items-center gap-3 border-b border-border py-1.5">
+                  <span className="num w-28 shrink-0 text-xs text-muted">{F.dmhm.format(Date.parse(x.first))}</span>
+                  <span className="mono min-w-0 grow break-all">{addr(x.dst, x.port)} <span className="text-xs text-muted">{x.proto.toUpperCase()}</span></span>
+                  {multi && <ServerTag name={x.server} />}
+                  <span className="num text-xs whitespace-nowrap text-muted">×{x.n}</span>
+                </li>
+              ))}
+            </ul>
+            <Button size="sm" variant="ghost" className="mt-1" onPress={() => onAccess(cn)}>All access of {cn}</Button>
+          </Section>
+        )}
         <Section title="Online times, last 14 days"><Timeline sessions={d.sessions} /></Section>
         <Section title="Traffic per day (by session start)"><DayBars days={d.days} /></Section>
         <Section title="Real IPs">

@@ -465,6 +465,78 @@ func (s *store) facets(ctx context.Context) (facets, error) {
 	return out, nil
 }
 
+// access is one row of the access log: a user's new connections to one destination in one minute.
+type access struct {
+	Server  string    `json:"server"`
+	CN      string    `json:"cn"` // "" = no session had the VPN IP then
+	Profile string    `json:"profile"`
+	Src     string    `json:"src"`
+	Dst     string    `json:"dst"`
+	Port    int       `json:"port"`
+	Proto   string    `json:"proto"`
+	First   time.Time `json:"first"`
+	Last    time.Time `json:"last"`
+	N       int       `json:"n"`
+}
+
+// accessWhere filters the access log: range, server, user, protocol, and q on the
+// user, VPN IP or destination ("192.0.2.10", ":445" and "192.0.2.10:445" all work).
+func (f filter) accessWhere() (string, []any) {
+	w := []string{fmt.Sprintf("t BETWEEN %d AND %d", f.from.Unix()/60*60, f.to.Unix())}
+	var args []any
+	for col, v := range map[string]string{"server": f.server, "cn": f.cn, "proto": f.proto, "profile": f.profile} {
+		if v != "" {
+			w = append(w, col+" = ?")
+			args = append(args, v)
+		}
+	}
+	if f.q != "" {
+		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.q) + "%"
+		w = append(w, `(cn LIKE ? ESCAPE '\' OR src LIKE ? ESCAPE '\' OR dst || ':' || port LIKE ? ESCAPE '\')`)
+		args = append(args, like, like, like)
+	}
+	return " WHERE " + strings.Join(w, " AND "), args
+}
+
+// eachAccess calls fn for every matching row, newest first unless sorted otherwise.
+func (s *store) eachAccess(ctx context.Context, f filter, fn func(access) error) error {
+	where, args := f.accessWhere()
+	order := orderBy(map[string]string{"time": "first", "cn": "cn COLLATE NOCASE", "server": "server", "src": "src",
+		"dst": "dst", "port": "port", "proto": "proto", "n": "n"}, f.sort, "time", f.desc)
+	rows, err := s.db.QueryContext(ctx, `SELECT server, cn, profile, src, dst, port, proto, first, last, n FROM flows`+where+
+		" ORDER BY "+order+", first DESC LIMIT ? OFFSET ?", append(args, f.limit, f.offset)...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a access
+		var first, last int64
+		if err := rows.Scan(&a.Server, &a.CN, &a.Profile, &a.Src, &a.Dst, &a.Port, &a.Proto, &first, &last, &a.N); err != nil {
+			return err
+		}
+		a.First, a.Last = time.Unix(first, 0).UTC(), time.Unix(last, 0).UTC()
+		if err := fn(a); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+type accessSummary struct {
+	Rows        int `json:"rows"`
+	Connections int `json:"connections"`
+	Users       int `json:"users"`
+	Dests       int `json:"destinations"` // distinct IP:port
+}
+
+func (s *store) accessSummary(ctx context.Context, f filter) (a accessSummary, err error) {
+	where, args := f.accessWhere()
+	err = s.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(n), 0), count(DISTINCT nullif(cn, '')), count(DISTINCT dst || ':' || port)
+		FROM flows`+where, args...).Scan(&a.Rows, &a.Connections, &a.Users, &a.Dests)
+	return a, err
+}
+
 // countryUse is one country (of the real IP) in the filtered sessions; "" = unknown.
 type countryUse struct {
 	Country  string `json:"country"`

@@ -270,6 +270,7 @@ export const ICONS = {
   download: "M12 4v11M7 10l5 5 5-5M5 20h14",
   right: "M9 6l6 6-6 6",
   device: "M5 5h14v10H5zM2 19h20M10 15v4M14 15v4",
+  log: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
 };
 export const Icon = ({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) => (
   <svg viewBox="0 0 24 24" className={`${className} shrink-0`} fill="none" stroke="currentColor" strokeWidth={1.8}

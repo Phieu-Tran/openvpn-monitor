@@ -19,7 +19,7 @@ function params(f: Filters, extra: Record<string, string> = {}) {
   return p;
 }
 
-function DateRange({ range, onChange }: { range: Range; onChange: (r: Range) => void }) {
+export function DateRange({ range, onChange }: { range: Range; onChange: (r: Range) => void }) {
   const [from, to] = rangeMs(range);
   return (
     <DateRangePicker aria-label="Date range" maxValue={today(TZ)}
@@ -82,7 +82,7 @@ function FilterBar({ filters: f, set, facets, csv }: { filters: Filters; set: (f
   );
 }
 
-function Pager({ page, total, onPage }: { page: number; total: number; onPage: (p: number) => void }) {
+export function Pager({ page, total, onPage }: { page: number; total: number; onPage: (p: number) => void }) {
   const pages = Math.max(1, Math.ceil(total / PAGE));
   if (total <= PAGE) return null;
   return (
@@ -102,7 +102,7 @@ function Pager({ page, total, onPage }: { page: number; total: number; onPage: (
 }
 
 // usePaged runs one filtered, sorted, paged query; the database does the work.
-function usePaged<T>(path: string, filters: Filters, sort: Sort) {
+export function usePaged<T>(path: string, filters: Filters, sort: Sort) {
   const q = useDebounced(filters.q.trim());
   const f = { ...filters, q };
   const base = JSON.stringify([rangeKey(f.range), q, f.server, f.profile, f.proto, f.country, f.plat, f.alerts, sort]);

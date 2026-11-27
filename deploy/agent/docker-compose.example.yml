@@ -10,7 +10,7 @@ name: ovpn-agent
 
 services:
   agent:
-    image: vihat/ovpn-agent:0.1.6
+    image: vihat/ovpn-agent:0.1.7
     restart: unless-stopped
     network_mode: host
     # uid 0 only to enter data/run (drwx------ root). cap_drop ALL leaves root with
@@ -18,6 +18,9 @@ services:
     user: "0:0"
     environment:
       OVPN_LISTEN: ${OVPN_LISTEN:?set OVPN_LISTEN in .env}
+      # Access log (which VPN user opened which IP:port, when): the VPN client subnets,
+      # e.g. 10.8.0.0/16. Empty = off. Needs the cap_add below.
+      OVPN_FLOWS: ${OVPN_FLOWS:-}
     healthcheck:
       test: ["CMD", "/app", "-healthcheck"]
       interval: 30s
@@ -26,6 +29,9 @@ services:
       retries: 3
     read_only: true
     cap_drop: [ALL]
+    # Only with OVPN_FLOWS: the kernel hands out its "new connection" events only with
+    # NET_ADMIN. The agent only listens: it changes no firewall, route or interface.
+    # cap_add: [NET_ADMIN]
     security_opt: ["no-new-privileges:true"]
     volumes:
       - ./data:/data:ro

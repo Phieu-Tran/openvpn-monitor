@@ -118,6 +118,23 @@ CREATE INDEX IF NOT EXISTS sessions_ended   ON sessions (ended);
 CREATE INDEX IF NOT EXISTS sessions_cn      ON sessions (cn, started);
 CREATE INDEX IF NOT EXISTS sessions_open    ON sessions (instance) WHERE open = 1;
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+-- The access log: one row per VPN client, destination and minute (agents with OVPN_FLOWS).
+CREATE TABLE IF NOT EXISTS flows (
+  server  TEXT    NOT NULL,
+  t       INTEGER NOT NULL, -- start of the minute, unix seconds
+  src     TEXT    NOT NULL, -- the client's VPN IP
+  dst     TEXT    NOT NULL,
+  port    INTEGER NOT NULL,
+  proto   TEXT    NOT NULL,
+  first   INTEGER NOT NULL, -- first and last new connection in that minute
+  last    INTEGER NOT NULL,
+  n       INTEGER NOT NULL, -- new connections in that minute
+  cn      TEXT    NOT NULL, -- the session that had src then; '' = none found
+  profile TEXT    NOT NULL,
+  PRIMARY KEY (server, t, src, dst, port, proto)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS flows_t  ON flows (t);
+CREATE INDEX IF NOT EXISTS flows_cn ON flows (cn, t);
 ` + samplesSchema
 
 // samplesSchema: one row per server and minute; the servers of one poll share t.
@@ -479,7 +496,7 @@ func (s *store) prune(now time.Time) {
 
 func (s *store) delete(before int64) (int64, error) {
 	var n int64
-	for _, q := range []string{"DELETE FROM sessions WHERE open = 0 AND ended < ?", "DELETE FROM samples WHERE t < ?"} {
+	for _, q := range []string{"DELETE FROM sessions WHERE open = 0 AND ended < ?", "DELETE FROM samples WHERE t < ?", "DELETE FROM flows WHERE t < ?"} {
 		res, err := s.db.Exec(q, before)
 		if err != nil {
 			return n, err
@@ -512,7 +529,7 @@ func (s *store) doPrune(now time.Time) error {
 		for used > s.maxBytes/10*9 {
 			var oldest sql.NullInt64
 			if err := s.db.QueryRow(`SELECT min(m) FROM (SELECT (SELECT ended FROM sessions WHERE open = 0 ORDER BY ended LIMIT 1) AS m
-				UNION ALL SELECT min(t) FROM samples)`).Scan(&oldest); err != nil {
+				UNION ALL SELECT min(t) FROM samples UNION ALL SELECT min(t) FROM flows)`).Scan(&oldest); err != nil {
 				return err
 			}
 			if !oldest.Valid {
@@ -622,11 +639,53 @@ func (s *store) fillCountries(country func(string) string) error {
 	return tx.Commit()
 }
 
+// agentFlow is one minute of connections, as served by ovpn-agent /api/v1/flows.
+type agentFlow struct {
+	T     int64  `json:"t"`
+	Src   string `json:"src"`
+	Dst   string `json:"dst"`
+	Port  int    `json:"port"`
+	Proto string `json:"proto"`
+	First int64  `json:"first"`
+	Last  int64  `json:"last"`
+	N     int    `json:"n"`
+}
+
+// addFlows stores one agent's closed minutes. The user is the session that had the
+// source VPN IP at that time (its end is the last poll that saw it, hence the slack).
+// Replaces a minute fetched twice (dash restart).
+func (s *store) addFlows(server string, flows []agentFlow) error {
+	if len(flows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	st, err := tx.Prepare(`INSERT INTO flows (server, t, src, dst, port, proto, first, last, n, cn, profile)
+		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, coalesce(u.cn, ''), coalesce(u.profile, '')
+		FROM (SELECT 1) LEFT JOIN (SELECT cn, profile FROM sessions
+			WHERE ended >= ?7 - 30 AND server = ?1 AND vpn_ip = ?3 AND started <= ?7 ORDER BY started DESC LIMIT 1) u
+		WHERE true
+		ON CONFLICT DO UPDATE SET first = excluded.first, last = excluded.last, n = excluded.n, cn = excluded.cn, profile = excluded.profile`)
+	if err != nil {
+		return err
+	}
+	for _, f := range flows {
+		if _, err := st.Exec(server, f.T, f.Src, f.Dst, f.Port, f.Proto, f.First, f.Last, f.N); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // storeStatus summarises what the store holds, for /api/status, /metrics and -check.
 type storeStatus struct {
 	Sessions    int       `json:"sessions"` // closed
 	Open        int       `json:"open"`
 	Samples     int       `json:"samples"`
+	Flows       int       `json:"flows"` // access log rows
 	Oldest      time.Time `json:"oldest,omitzero"`
 	WriteErrors uint64    `json:"write_errors"`
 	Retention   float64   `json:"retention_days"`
@@ -643,9 +702,9 @@ func (s *store) status() storeStatus {
 		var c storeStatus
 		var oldest, trimmed sql.NullInt64
 		err := s.db.QueryRow(`SELECT (SELECT count(*) FROM sessions), (SELECT count(*) FROM sessions WHERE open = 1),
-			(SELECT count(*) FROM samples),
+			(SELECT count(*) FROM samples), (SELECT count(*) FROM flows),
 			(SELECT min(m) FROM (SELECT min(started) AS m FROM sessions UNION ALL SELECT min(t) FROM samples)),
-			(SELECT v FROM meta WHERE k = 'trimmed')`).Scan(&c.Sessions, &c.Open, &c.Samples, &oldest, &trimmed)
+			(SELECT v FROM meta WHERE k = 'trimmed')`).Scan(&c.Sessions, &c.Open, &c.Samples, &c.Flows, &oldest, &trimmed)
 		if err != nil {
 			log.Printf("history status: %v", err)
 		} else {

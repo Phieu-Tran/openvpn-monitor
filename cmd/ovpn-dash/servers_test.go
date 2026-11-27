@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -172,5 +173,77 @@ func TestPollerMerge(t *testing.T) {
 	p.serve(w, httptest.NewRequest("GET", "/api/sessions", nil))
 	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "a: agent unreachable") {
 		t.Fatalf("all down: %d %s", w.Code, w.Body)
+	}
+}
+
+// The access log: the dash fetches closed minutes from each agent and names the user by
+// the session that had the source VPN IP.
+func TestAccessLog(t *testing.T) {
+	min := time.Now().Truncate(time.Minute).Add(-2 * time.Minute).Unix()
+	var asked []string
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/flows" {
+			asked = append(asked, r.URL.Query().Get("since"))
+			json.NewEncoder(w).Encode(map[string]any{"enabled": true, "flows": []agentFlow{
+				{T: min, Src: "10.8.0.2", Dst: "192.0.2.10", Port: 445, Proto: "tcp", First: min + 5, Last: min + 50, N: 12},
+				{T: min + 60, Src: "10.8.0.99", Dst: "192.0.2.11", Port: 53, Proto: "udp", First: min + 61, Last: min + 61, N: 1},
+			}})
+			return
+		}
+		json.NewEncoder(w).Encode(resp(true, 1)) // u1 on 10.8.0.2
+	}))
+	defer agent.Close()
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/flows" {
+			http.NotFound(w, r) // agent 0.1.6
+			return
+		}
+		json.NewEncoder(w).Encode(resp(true))
+	}))
+	defer old.Close()
+
+	st := open(t, t.TempDir(), 90*24*time.Hour, 0)
+	agents, _ := parseAgents("a=" + agent.URL + ",b=" + old.URL)
+	p := &poller{servers: agents, client: agent.Client(), store: st, geo: newGeo("", "")}
+	p.poll()
+	p.poll() // the same minutes again (as after a dash restart): replaced, not doubled
+	if len(asked) != 2 || asked[0] != "0" || asked[1] != fmt.Sprint(min+60) {
+		t.Errorf("since: %v", asked)
+	}
+	if s := p.status(); s[0].Flows != "on" || s[1].Flows != "off" {
+		t.Errorf("status: %+v", s)
+	}
+
+	mux := http.NewServeMux()
+	(&api{store: st}).routes(mux)
+	get := func(url string) (out struct {
+		Access  []access      `json:"access"`
+		Summary accessSummary `json:"summary"`
+	}) {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", url, nil))
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%s: %d %s", url, w.Code, w.Body)
+		}
+		return out
+	}
+	all := get("/api/access")
+	if len(all.Access) != 2 || all.Summary != (accessSummary{Rows: 2, Connections: 13, Users: 1, Dests: 2}) {
+		t.Fatalf("all: %+v", all)
+	}
+	smb := all.Access[1]
+	if smb.CN != "u1" || smb.Profile != "all-dev" || smb.Server != "a" || smb.N != 12 || smb.First.Unix() != min+5 || all.Access[0].CN != "" {
+		t.Errorf("rows: %+v", all.Access)
+	}
+	for url, want := range map[string]int{"/api/access?q=192.0.2.10:445": 1, "/api/access?q=:53": 1, "/api/access?cn=u1": 1,
+		"/api/access?proto=udp": 1, "/api/access?server=b": 0, "/api/access?q=%25": 0, "/api/access?sort=n&dir=asc": 2} {
+		if got := get(url); len(got.Access) != want {
+			t.Errorf("%s: %d rows", url, len(got.Access))
+		}
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/access.csv", nil))
+	if body := w.Body.String(); !strings.Contains(body, ",u1,all-dev,a,10.8.0.2,192.0.2.10,445,tcp,12\r\n") {
+		t.Errorf("csv: %q", body)
 	}
 }

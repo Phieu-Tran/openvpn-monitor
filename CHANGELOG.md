@@ -4,6 +4,18 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.7 - 2026-11-27
+
+### Added
+
+- Access log: which user opened which IP:port, when. Optional per OpenVPN host:
+  `OVPN_FLOWS=<VPN client subnets>` and `cap_add: [NET_ADMIN]` on the agent, which then
+  listens to the kernel's "new connection" events (read only; source = the client's VPN IP,
+  before NAT). The dash stores one row per user, destination and minute (first/last time,
+  count), names the user from the session that had the VPN IP, and shows an "Access log" view
+  (search by user, IP or `ip:port`, CSV) and "Recent access" in a user's details. A banner says
+  which agents do not record it and why.
+
 ## 0.1.6 - 2026-11-27
 
 ### Added

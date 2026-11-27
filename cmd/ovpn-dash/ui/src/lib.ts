@@ -30,6 +30,12 @@ export interface SessionRecord {
   open?: boolean; country?: string; device?: Device;
 }
 export interface DeviceUse { plat: string; gui?: string; ver?: string; users: number; sessions: number; last: string }
+// The access log: a user's new connections to one destination in one minute.
+export interface AccessRow {
+  server: string; cn: string; profile: string; src: string; dst: string; port: number; proto: string;
+  first: string; last: string; n: number;
+}
+export interface Access { access: AccessRow[]; summary: { rows: number; connections: number; users: number; destinations: number } }
 export interface CountryUse { country: string; users: number; sessions: number; bytes: number }
 export interface History {
   sessions: SessionRecord[];
@@ -56,7 +62,7 @@ export interface Heat { cells: { day: number; hour: number; avg: number; max: nu
 export interface Facets { servers: string[]; profiles: string[]; countries: string[]; plats: string[] }
 export interface Status {
   version: string; geoip: string; geoip_ok: boolean; alerts: { rate: number };
-  agents: { name: string; ok: boolean; error?: string; version?: string }[];
+  agents: { name: string; ok: boolean; error?: string; version?: string; flows?: string; flows_dropped?: number }[];
   store: {
     sessions: number; open: number; samples: number; oldest?: string; write_errors: number;
     retention_days: number; data_bytes: number; max_bytes: number; trimmed?: string;

@@ -54,7 +54,7 @@ func TestPollerEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	ln := serveFake(t, filepath.Join(root, "all-dev", "mgmt-udp.sock"))
 	p := newPoller(root, time.Second)
-	h := p.handler("0123456789abcdef")
+	h := p.handler("0123456789abcdef", nil)
 
 	p.poll()
 	time.Sleep(20 * time.Millisecond)
