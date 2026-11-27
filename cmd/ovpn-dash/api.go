@@ -119,7 +119,7 @@ func (a *api) filter(w http.ResponseWriter, r *http.Request) (filter, bool) {
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	return filter{from: from, to: to, q: strings.TrimSpace(q.Get("q")), profile: q.Get("profile"), proto: q.Get("proto"),
-		country: q.Get("country"), cn: q.Get("cn"), alerts: q.Get("alerts") == "1", rate: a.alerts.Rate,
+		country: q.Get("country"), cn: q.Get("cn"), plat: q.Get("plat"), alerts: q.Get("alerts") == "1", rate: a.alerts.Rate,
 		sort: q.Get("sort"), desc: q.Get("dir") != "asc", limit: min(limit, 500), offset: max(offset, 0)}, ok
 }
 
@@ -148,7 +148,11 @@ func (a *api) history(w http.ResponseWriter, r *http.Request) {
 	if !check(w, r, err) {
 		return
 	}
-	writeJSON(w, map[string]any{"from": f.from, "to": f.to, "sessions": list, "summary": sum})
+	devices, err := a.store.deviceUses(r.Context(), f)
+	if !check(w, r, err) {
+		return
+	}
+	writeJSON(w, map[string]any{"from": f.from, "to": f.to, "sessions": list, "summary": sum, "devices": devices})
 }
 
 func (a *api) users(w http.ResponseWriter, r *http.Request) {

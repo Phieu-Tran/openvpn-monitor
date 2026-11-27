@@ -20,6 +20,7 @@ const vnOffset = 7 * 3600
 type filter struct {
 	from, to                       time.Time
 	q, profile, proto, country, cn string
+	plat                           string // IV_PLAT, or "unknown" for sessions without a device
 	alerts                         bool
 	rate                           float64 // alert threshold in bytes/s; 0 = alerts off
 	sort                           string
@@ -53,6 +54,13 @@ func (f filter) where(now time.Time) (string, []any) {
 	eq("proto", f.proto)
 	eq("country", f.country)
 	eq("cn", f.cn)
+	switch f.plat {
+	case "":
+	case "unknown":
+		w = append(w, "device = ''")
+	default:
+		eq("(nullif(device, '') ->> 'plat')", f.plat)
+	}
 	if f.q != "" {
 		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.q) + "%"
 		w = append(w, `(cn LIKE ? ESCAPE '\' OR real_ip LIKE ? ESCAPE '\' OR vpn_ip LIKE ? ESCAPE '\')`)
@@ -63,7 +71,7 @@ func (f filter) where(now time.Time) (string, []any) {
 
 // narrow reports that few rows are likely to match: a short range or any filter.
 func (f filter) narrow() bool {
-	return f.to.Sub(f.from) <= 24*time.Hour || f.q != "" || f.profile != "" || f.proto != "" || f.country != "" || f.cn != "" || f.alerts
+	return f.to.Sub(f.from) <= 24*time.Hour || f.q != "" || f.profile != "" || f.proto != "" || f.country != "" || f.cn != "" || f.plat != "" || f.alerts
 }
 
 // seenUntil is the end of a session for display: now for an open one.
@@ -404,6 +412,7 @@ func (s *store) heatmap(ctx context.Context, from, to time.Time) ([]heatCell, er
 type facets struct {
 	Profiles  []string `json:"profiles"`
 	Countries []string `json:"countries"`
+	Plats     []string `json:"plats"`
 }
 
 func (s *store) facets(ctx context.Context) (facets, error) {
@@ -413,15 +422,57 @@ func (s *store) facets(ctx context.Context) (facets, error) {
 	if time.Since(at) < 5*time.Minute {
 		return cached, nil
 	}
-	var p, c sql.NullString
+	var p, c, d sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT (SELECT group_concat(DISTINCT profile) FROM sessions),
-		(SELECT group_concat(DISTINCT nullif(country, '')) FROM sessions)`).Scan(&p, &c)
+		(SELECT group_concat(DISTINCT nullif(country, '')) FROM sessions),
+		(SELECT group_concat(DISTINCT nullif(device, '') ->> 'plat') FROM sessions)`).Scan(&p, &c, &d)
 	if err != nil {
 		return facets{}, err
 	}
-	out := facets{Profiles: splitList(p), Countries: splitList(c)}
+	out := facets{Profiles: splitList(p), Countries: splitList(c), Plats: splitList(d)}
 	s.mu.Lock()
 	s.facet, s.facetAt = out, time.Now()
 	s.mu.Unlock()
 	return out, nil
+}
+
+// deviceUse is one kind of device (OS + app) seen in the filtered sessions.
+type deviceUse struct {
+	Plat     string    `json:"plat"`
+	GUI      string    `json:"gui,omitempty"`
+	Ver      string    `json:"ver,omitempty"` // only without an app: then the version is the client
+	Users    int       `json:"users"`
+	Sessions int       `json:"sessions"`
+	Last     time.Time `json:"last"`
+}
+
+// deviceUses lists the devices that connected in the filtered sessions (up to 50 kinds);
+// sessions without a device are left out.
+func (s *store) deviceUses(ctx context.Context, f filter) ([]deviceUse, error) {
+	now := time.Now()
+	where, args := f.where(now)
+	if f.alerts {
+		where += " AND peak > ?"
+		args = append(args, f.threshold())
+	}
+	// The app (IV_GUI_VER) names the client; without one, the OpenVPN version does.
+	rows, err := s.db.QueryContext(ctx, `SELECT device ->> 'plat' AS plat, coalesce(device ->> 'gui', '') AS gui,
+		CASE WHEN device ->> 'gui' IS NULL THEN coalesce(device ->> 'ver', '') ELSE '' END AS ver,
+		count(DISTINCT cn), count(*), max(`+seenUntil(now)+`) AS last
+		FROM sessions`+where+` AND device <> '' GROUP BY plat, gui, ver ORDER BY count(DISTINCT cn) DESC, last DESC LIMIT 50`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []deviceUse{}
+	for rows.Next() {
+		var d deviceUse
+		var last int64
+		if err := rows.Scan(&d.Plat, &d.GUI, &d.Ver, &d.Users, &d.Sessions, &last); err != nil {
+			return nil, err
+		}
+		d.Last = time.Unix(last, 0).UTC()
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }

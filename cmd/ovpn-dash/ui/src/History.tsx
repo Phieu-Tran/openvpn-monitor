@@ -1,18 +1,18 @@
 import { parseDate, today } from "@internationalized/date";
 import { Button, Card, DateField, DateRangePicker, Pagination, RangeCalendar } from "@heroui/react";
 import { useEffect, useState } from "react";
-import { F, PRESETS, TZ, addr, bytes, countryName, duration, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
-import type { Facets, History, Preset, Range, SessionRecord, UserRow, Users } from "./lib";
+import { F, PRESETS, TZ, addr, appName, bytes, countryName, duration, platName, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
+import type { DeviceUse, Facets, History, Preset, Range, SessionRecord, UserRow, Users } from "./lib";
 import { Badge, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
-export interface Filters { range: Range; q: string; profile: string; proto: string; country: string; alerts: boolean }
+export interface Filters { range: Range; q: string; profile: string; proto: string; country: string; plat: string; alerts: boolean }
 
 const PAGE = 50;
 
 function params(f: Filters, extra: Record<string, string> = {}) {
   const p = rangeParams(f.range);
-  for (const [k, v] of Object.entries({ q: f.q, profile: f.profile, proto: f.proto, country: f.country, alerts: f.alerts ? "1" : "", ...extra })) {
+  for (const [k, v] of Object.entries({ q: f.q, profile: f.profile, proto: f.proto, country: f.country, plat: f.plat, alerts: f.alerts ? "1" : "", ...extra })) {
     if (v) p.set(k, v);
   }
   return p;
@@ -52,7 +52,7 @@ function DateRange({ range, onChange }: { range: Range; onChange: (r: Range) => 
 const HISTORY_PRESETS: Preset[] = ["24h", "7d", "30d", "90d"];
 
 function FilterBar({ filters: f, set, facets, csv }: { filters: Filters; set: (f: Filters) => void; facets?: Facets; csv: { label: string; url: () => string } }) {
-  const active = [f.q, f.profile, f.proto, f.country, f.alerts].filter(Boolean).length;
+  const active = [f.q, f.profile, f.proto, f.country, f.plat, f.alerts].filter(Boolean).length;
   return (
     <Card className="gap-3">
       <div className="flex flex-wrap items-center gap-3">
@@ -68,9 +68,11 @@ function FilterBar({ filters: f, set, facets, csv }: { filters: Filters; set: (f
         <Picker label="Protocol" all="UDP + TCP" value={f.proto} options={["udp", "tcp"]} name={(v) => v.toUpperCase()} onChange={(proto) => set({ ...f, proto })} />
         <Picker label="Country" all="All countries" value={f.country} options={facets?.countries ?? []} onChange={(country) => set({ ...f, country })}
           name={(c) => (c === "LAN" ? countryName(c) : `${c} · ${countryName(c)}`)} />
+        <Picker label="Device" all="All devices" value={f.plat} options={[...(facets?.plats ?? []), "unknown"]}
+          name={(p) => (p === "unknown" ? "Unknown device" : platName(p))} onChange={(plat) => set({ ...f, plat })} />
         <Toggle label="Alerts only" value={f.alerts} onChange={(alerts) => set({ ...f, alerts })} />
         {active > 0 && (
-          <Button size="sm" variant="ghost" onPress={() => set({ ...f, q: "", profile: "", proto: "", country: "", alerts: false })}>
+          <Button size="sm" variant="ghost" onPress={() => set({ ...f, q: "", profile: "", proto: "", country: "", plat: "", alerts: false })}>
             Clear {active} filter{active > 1 ? "s" : ""}
           </Button>
         )}
@@ -102,13 +104,40 @@ function Pager({ page, total, onPage }: { page: number; total: number; onPage: (
 function usePaged<T>(path: string, filters: Filters, sort: Sort) {
   const q = useDebounced(filters.q.trim());
   const f = { ...filters, q };
-  const base = JSON.stringify([rangeKey(f.range), q, f.profile, f.proto, f.country, f.alerts, sort]);
+  const base = JSON.stringify([rangeKey(f.range), q, f.profile, f.proto, f.country, f.plat, f.alerts, sort]);
   const [page, setPage] = useState({ base, n: 0 });
   const n = page.base === base ? page.n : 0; // new filters start at the first page
   useEffect(() => { if (page.base !== base) setPage({ base, n: 0 }); }, [base, page.base]);
   const order = { sort: sort.k, dir: sort.dir > 0 ? "asc" : "desc" };
   const result = useJSON<T>(`${path}|${base}|${n}`, () => `${path}?${params(f, { ...order, limit: String(PAGE), offset: String(n * PAGE) })}`, 30000);
   return { ...result, page: n, setPage: (v: number) => setPage({ base, n: v }), csvURL: () => `${path}.csv?${params(f, order)}` };
+}
+
+// Devices: every kind of device (OS + app) that connected in the filtered sessions.
+// A card filters the history by its OS; again clears it.
+function Devices({ list, plat, loading, onPlat }: { list?: DeviceUse[]; plat: string; loading: boolean; onPlat: (p: string) => void }) {
+  if (!list) return null;
+  return (
+    <Panel title="Devices that connected" actions={<span className="text-xs text-muted">reported by the client app (OpenVPN peer info), not verified</span>}>
+      {!list.length ? <p className={`text-sm text-muted ${loading ? "stale" : ""}`}>No device reported in this range.</p> : (
+        <ul className={`grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-2 ${loading ? "stale" : ""}`}>
+          {list.map((d) => (
+            <li key={d.plat + d.gui}>
+              <button type="button" aria-pressed={plat === d.plat} onClick={() => onPlat(plat === d.plat ? "" : d.plat)}
+                className={`flex w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2 text-left transition-colors ${plat === d.plat ? "border-accent bg-accent-soft" : "border-border hover:bg-default"}`}>
+                <DeviceIcon plat={d.plat} className="size-6" />
+                <span className="min-w-0 grow">
+                  <span className="block text-sm font-medium">{platName(d.plat)}</span>
+                  <span className="block truncate text-xs text-muted" title={d.gui}>{appName(d) || "–"}</span>
+                  <span className="num block text-xs text-muted">{d.users} {d.users === 1 ? "user" : "users"} · {d.sessions} sessions · {relative(Date.parse(d.last))}</span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
 }
 
 interface PageProps { filters: Filters; setFilters: (f: Filters) => void; facets?: Facets; alertRate: number; onUser: (cn: string) => void; profiles: string[] }
@@ -129,7 +158,7 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
     { id: "proto", label: "Proto", cell: (x) => x.proto.toUpperCase() },
     { id: "real", label: "Real IP", cell: (x) => <><CountryTag cc={x.country} /><span className="mono">{addr(x.real_ip, x.real_port)}</span></> },
     { id: "vpn", label: "VPN IP", cell: (x) => <span className="mono">{x.vpn_ip}</span> },
-    { id: "device", label: "Device", cell: (x) => <DeviceTag device={x.device} compact /> },
+    { id: "device", label: "Device", cell: (x) => <DeviceTag device={x.device} /> },
     { id: "start", label: "Start", cell: (x) => <span title={F.abs.format(Date.parse(x.start))}>{F.dmhm.format(Date.parse(x.start))}</span> },
     { id: "end", label: "End", cell: (x) => (x.open ? <Badge tone="success">online now</Badge> : <span title={F.abs.format(end(x))}>{F.dmhm.format(end(x))}</span>) },
     { id: "dur", label: "Duration", num: true, cell: (x) => duration((end(x) - Date.parse(x.start)) / 1000) },
@@ -138,6 +167,7 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
   return (
     <div className="grid min-w-0 gap-4">
       <FilterBar filters={filters} set={setFilters} facets={facets} csv={{ label: "Export sessions CSV", url: r.csvURL }} />
+      <Devices list={r.data?.devices} plat={filters.plat} loading={r.loading} onPlat={(plat) => setFilters({ ...filters, plat })} />
       <Panel title="Sessions" flush actions={s && !r.loading && (
         <span className="num text-sm text-muted">
           {s.total.toLocaleString("en-GB")} sessions · {s.users} {s.users === 1 ? "user" : "users"} · {duration(s.online_seconds)} online · ↑ {bytes(s.bytes_rx)} / ↓ {bytes(s.bytes_tx)} · {s.alerts} with alerts

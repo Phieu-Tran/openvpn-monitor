@@ -391,4 +391,41 @@ func TestStoreDevice(t *testing.T) {
 	if strings.Join(plats, " ") != "u1=win u2=" && strings.Join(plats, " ") != "u2= u1=win" {
 		t.Fatalf("user plats: %v", plats)
 	}
+
+	// History: filter by OS, "unknown" = no device; the devices seen in the range.
+	byPlat := func(p string) string {
+		f := all
+		f.plat = p
+		var cns []string
+		for _, r := range list(t, s, f) {
+			cns = append(cns, r.CN)
+		}
+		return strings.Join(cns, ",")
+	}
+	if byPlat("win") != "u1" || byPlat("unknown") != "u2" || byPlat("ios") != "" {
+		t.Fatalf("plat filter: win=%q unknown=%q ios=%q", byPlat("win"), byPlat("unknown"), byPlat("ios"))
+	}
+	uses, err := s.deviceUses(context.Background(), all)
+	if err != nil || len(uses) != 1 || uses[0].Plat != "win" || uses[0].GUI != "OpenVPN_GUI_11" || uses[0].Users != 1 || uses[0].Sessions != 1 {
+		t.Fatalf("device uses: %+v %v", uses, err)
+	}
+	if fc, err := s.facets(context.Background()); err != nil || strings.Join(fc.Plats, ",") != "win" {
+		t.Fatalf("facets: %+v %v", fc, err)
+	}
+
+	// The stored device of an open session survives an agent restart.
+	known, err := s.knownDevices()
+	if err != nil || known[sessionKey("openvpn-udp-all-dev-v2", 1, at(0).Add(time.Second).Unix())] != win || len(known) != 1 {
+		t.Fatalf("known devices: %+v %v", known, err)
+	}
+
+	// A half device (no OS) stored by agent 0.1.3 is cleared on start.
+	if _, err := s.db.Exec(`UPDATE sessions SET device = '{"gui":"OCWindows_3.8.0"}' WHERE cn = 'u2'`); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Close()
+	s = open(t, dir, 90*24*time.Hour, 0)
+	if got := list(t, s, all); got[0].CN != "u2" || got[0].Device != (mgmt.Device{}) || got[1].Device != win {
+		t.Fatalf("after cleanup: %+v", got)
+	}
 }

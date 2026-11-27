@@ -190,6 +190,12 @@ func openStore(dir string, retention time.Duration, maxBytes int64, country func
 			return nil, err
 		}
 	}
+	// Agent 0.1.3 could report half a device (its first lines already gone from
+	// OpenVPN's log cache): drop those without an OS. Cheap, and a no-op once clean.
+	if _, err := db.Exec("UPDATE sessions SET device = '' WHERE device <> '' AND coalesce(device ->> 'plat', '') = ''"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.importJSONL(country); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("importing the old history files: %w", err)
@@ -616,4 +622,33 @@ func backup(dir string, now time.Time) (string, error) {
 	dest := filepath.Join(dir, "backup-"+now.UTC().Format("20060102-150405")+".db")
 	_, err = db.Exec("VACUUM INTO ?", dest)
 	return dest, err
+}
+
+// knownDevices returns the stored device of each open session, keyed by
+// instance|cid|started: an agent restart forgets devices until the next
+// renegotiation (up to an hour), the history does not.
+func (s *store) knownDevices() (map[string]mgmt.Device, error) {
+	rows, err := s.db.Query("SELECT instance, cid, started, device FROM sessions INDEXED BY sessions_open WHERE open = 1 AND device <> ''")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]mgmt.Device{}
+	for rows.Next() {
+		var inst, dev string
+		var cid uint64
+		var started int64
+		if err := rows.Scan(&inst, &cid, &started, &dev); err != nil {
+			return nil, err
+		}
+		var d mgmt.Device
+		if json.Unmarshal([]byte(dev), &d) == nil {
+			out[sessionKey(inst, cid, started)] = d
+		}
+	}
+	return out, rows.Err()
+}
+
+func sessionKey(instance string, cid uint64, started int64) string {
+	return fmt.Sprintf("%s|%d|%d", instance, cid, started)
 }

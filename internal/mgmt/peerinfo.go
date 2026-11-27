@@ -20,6 +20,10 @@ type Device struct {
 
 // ReadPeerInfo reads "log all" output until END and returns the device each
 // address reported, keyed by AddrKey. A later handshake of the same address wins.
+//
+// The cache drops its oldest lines first, and the agent's own polls fill it fast
+// (~250 lines = ~4 min), so the oldest block is often cut at the top: lines of an
+// address count only after its IV_VER (the first line of every handshake).
 func ReadPeerInfo(r io.Reader) (map[string]Device, error) {
 	out := map[string]Device{}
 	sc := bufio.NewScanner(r)
@@ -44,7 +48,10 @@ func ReadPeerInfo(r io.Reader) (map[string]Device, error) {
 		}
 		k, v, _ := strings.Cut(kv, "=")
 		key := AddrKey(SplitAddr(addr))
-		d := out[key]
+		d, started := out[key]
+		if !started && k != "IV_VER" {
+			continue // the start of this block already left the cache
+		}
 		switch k {
 		case "IV_VER": // first line of every handshake: start over
 			d = Device{Ver: v}

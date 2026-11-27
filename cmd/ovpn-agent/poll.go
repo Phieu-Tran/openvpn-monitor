@@ -127,7 +127,7 @@ func (p *poller) pollOne(in *instance) {
 			if dt := now.Sub(old.at).Seconds(); dt > 0 {
 				s.RateRx, s.RateTx = rate(c.BytesRx, old.rx, dt), rate(c.BytesTx, old.tx, dt)
 			}
-			if s.Device == (mgmt.Device{}) {
+			if s.Device.Plat == "" && old.dev.Plat != "" { // never trade a full device for a partial one
 				s.Device = old.dev
 			}
 		}

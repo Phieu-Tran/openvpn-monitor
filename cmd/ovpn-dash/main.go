@@ -204,11 +204,22 @@ func (p *poller) poll() {
 		if err := json.Unmarshal(body, &r); err != nil {
 			status, body = fail("decoding agent response: " + err.Error())
 		} else {
-			// Add the country of each real IP for the browser.
+			// Add the country of each real IP for the browser, and the stored device
+			// of sessions the agent no longer knows one for.
+			known, err := p.store.knownDevices()
+			if err != nil {
+				log.Printf("stored devices: %v", err)
+			}
 			for i := range r.Instances {
-				for j := range r.Instances[i].Sessions {
-					s := &r.Instances[i].Sessions[j]
+				in := &r.Instances[i]
+				for j := range in.Sessions {
+					s := &in.Sessions[j]
 					s.Country = p.geo.country(s.RealIP)
+					if s.Device.Plat == "" {
+						if d, ok := known[sessionKey(in.Name, s.CID, s.ConnectedSince.Unix())]; ok {
+							s.Device = d
+						}
+					}
 				}
 			}
 			body, _ = json.Marshal(r)

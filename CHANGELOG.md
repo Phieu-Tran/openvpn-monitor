@@ -4,6 +4,24 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.4 - 2026-11-27
+
+### Added
+
+- History: "Devices that connected" in the filtered range (OS + app, users, sessions, last
+  seen); a card filters the history by that OS. A Device filter (OS, or "Unknown device") in
+  History and Users; the Device column shows OS and app.
+
+### Fixed
+
+- Devices disappeared a few minutes after connecting: the agent's own polls fill OpenVPN's
+  250-line log cache in ~4 minutes, and when a client's `peer info` block was cut at the top,
+  the remaining half (no OS) replaced the full device. Cut blocks are now ignored, and the agent
+  never trades a full device for a partial one.
+- After an agent restart, open sessions get their device back from the dash's history at once
+  instead of after the next renegotiation (up to an hour).
+- Half devices stored by 0.1.3 are cleared when the dash starts.
+
 ## 0.1.3 - 2026-11-27
 
 ### Added

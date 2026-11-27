@@ -55,7 +55,7 @@ export function App() {
 
   const [preset, setPreset] = usePref<Preset>("hpreset", "7d");
   const [filters, setFilterState] = useState<Filters>(() => ({
-    range: { preset: preset in PRESETS ? preset : "7d" }, q: query.get("q") ?? "", profile: "", proto: "", country: "", alerts: false,
+    range: { preset: preset in PRESETS ? preset : "7d" }, q: query.get("q") ?? "", profile: "", proto: "", country: "", plat: "", alerts: false,
   }));
   const setFilters = (f: Filters) => { setFilterState(f); if ("preset" in f.range) setPreset(f.range.preset); };
   // links like #history?q=name set the search box

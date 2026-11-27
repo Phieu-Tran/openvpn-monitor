@@ -27,8 +27,10 @@ export interface SessionRecord {
   vpn_ip: string; start: string; end: string; bytes_rx: number; bytes_tx: number; peak_rate?: number;
   open?: boolean; country?: string; device?: Device;
 }
+export interface DeviceUse { plat: string; gui?: string; ver?: string; users: number; sessions: number; last: string }
 export interface History {
   sessions: SessionRecord[];
+  devices: DeviceUse[];
   summary: { total: number; users: number; online_seconds: number; bytes_rx: number; bytes_tx: number; alerts: number };
 }
 export interface UserRow {
@@ -47,7 +49,7 @@ export interface Series {
   points: { t: string; online: Record<string, number>; up: number; total: number; rx: number; tx: number }[];
 }
 export interface Heat { cells: { day: number; hour: number; avg: number; max: number }[] }
-export interface Facets { profiles: string[]; countries: string[] }
+export interface Facets { profiles: string[]; countries: string[]; plats: string[] }
 export interface Status {
   version: string; geoip: string; geoip_ok: boolean; alerts: { rate: number };
   agent: { ok: boolean; error?: string; version?: string };

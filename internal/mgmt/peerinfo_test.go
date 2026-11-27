@@ -6,8 +6,12 @@ import (
 	"testing"
 )
 
-// Lines from a real OpenVPN 2.6.23 "log all" (verb 3), plus IPv6, cn/ prefix and a reconnect.
+// Lines from a real OpenVPN 2.6.23 "log all" (verb 3), plus IPv6, cn/ prefix, a reconnect,
+// and on top a block whose IV_VER/IV_PLAT already left the cache (must be ignored: a
+// device without its OS once overwrote the full one the agent remembered).
 const logAll = `>INFO:OpenVPN Management Interface Version 5 -- type 'help' for more info
+1795746100,I,198.51.100.7:1111 peer info: IV_CIPHERS=AES-256-GCM
+1795746100,I,198.51.100.7:1111 peer info: IV_GUI_VER=OCWindows_3.8.0-4528
 1795746177,I,OpenVPN 2.6.23 x86_64-alpine-linux-musl [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [MH/PKTINFO] [AEAD]
 1795746178,I,127.0.0.1:58340 VERIFY OK: depth=0, CN=test1
 1795746178,I,127.0.0.1:58340 peer info: IV_VER=2.6.23
