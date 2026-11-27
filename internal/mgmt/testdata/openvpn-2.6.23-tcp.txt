@@ -1,0 +1,12 @@
+>INFO:OpenVPN Management Interface Version 5 -- type 'help' for more info
+TITLE	OpenVPN 2.6.23 x86_64-alpine-linux-musl [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [MH/PKTINFO] [AEAD]
+TIME	2026-11-26 09:33:10	1795685590
+HEADER	CLIENT_LIST	Common Name	Real Address	Virtual Address	Virtual IPv6 Address	Bytes Received	Bytes Sent	Connected Since	Connected Since (time_t)	Username	Client ID	Peer ID	Data Channel Cipher
+CLIENT_LIST	test1	172.22.0.7:41108	10.9.0.2		7802	7771	2026-11-26 09:32:34	1795685554	UNDEF	0	0	AES-256-GCM
+CLIENT_LIST	test2	172.22.0.8:33248	10.9.0.3		30435	30459	2026-11-26 09:32:34	1795685554	UNDEF	1	1	AES-256-GCM
+HEADER	ROUTING_TABLE	Virtual Address	Common Name	Real Address	Last Ref	Last Ref (time_t)
+ROUTING_TABLE	10.9.0.2	test1	172.22.0.7:41108	2026-11-26 09:33:10	1795685590
+ROUTING_TABLE	10.9.0.3	test2	172.22.0.8:33248	2026-11-26 09:33:10	1795685590
+GLOBAL_STATS	Max bcast/mcast queue length	2
+GLOBAL_STATS	dco_enabled	0
+END

@@ -1,0 +1,51 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+/* Country flags: Windows has no flag emoji, so ship them (Twemoji, CC-BY 4.0) for that range only. */
+@font-face {
+  font-family: "Twemoji Country Flags";
+  src: url("./flags.woff2") format("woff2");
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F;
+  font-display: swap;
+}
+.flag { font-family: "Twemoji Country Flags", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+
+/* Chart palette: softened steps of the validated order blue, orange, teal, amber, pink
+   (checked for colour-vision deficiency in both themes; slots 6-8 only past five profiles),
+   and one blue ramp for the heatmap. */
+:root {
+  --s1: #4a8fe7; --s2: #f07c4a; --s3: #0f9a8a; --s4: #e0a21f; --s5: #e57aa8;
+  --s6: #3f9b4f; --s7: #8170e0; --s8: #e05d5d; --sx: #9a9a9a;
+  --grid: #ededef; --axis: #d4d4d8;
+  --h0: #f1f3f5; --h1: #d6e7fb; --h2: #aecdf5; --h3: #84b2ee; --h4: #5a97e6; --h5: #3a7bd0; --h6: #255ea8;
+}
+.dark {
+  --s1: #4f95ec; --s2: #e57f4e; --s3: #1fae8e; --s4: #c9922a; --s5: #de6fa3;
+  --s6: #4aad5c; --s7: #9585ee; --s8: #e46a6a; --sx: #8a8a8a;
+  --grid: #2a2a2e; --axis: #3d3d42;
+  --h0: #232326; --h1: #1b3557; --h2: #23497c; --h3: #2f62a6; --h4: #4a83cf; --h5: #74a5e6; --h6: #a9c8f2;
+}
+
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.8125rem; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* dense tables; a whole row opens its details */
+.data-table th, .data-table td { white-space: nowrap; }
+.data-table td { padding-block: 0.45rem; }
+.data-table th, .data-table td { padding-inline: 0.75rem; }
+.data-table.clickable tbody tr { cursor: pointer; }
+.data-table tr.row-alert td { background: color-mix(in oklab, var(--danger) 12%, var(--surface)); }
+.data-table tr.row-warn td { background: color-mix(in oklab, var(--warning) 14%, var(--surface)); }
+.stale { opacity: 0.5; }
+
+/* live dot */
+@keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+.live-dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: currentColor; animation: pulse-ring 1.8s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+
+.chart svg { display: block; overflow: visible; }
+.chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .grid-line { stroke: var(--grid); stroke-width: 1; }
+.chart .axis-line { stroke: var(--axis); stroke-width: 1; }
+.chart .line { fill: none; stroke-linejoin: round; stroke-linecap: round; }

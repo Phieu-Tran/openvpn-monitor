@@ -1,0 +1,37 @@
+# ovpn-dash: runs on the monitor host, published on 127.0.0.1:9178 only.
+# Copy to docker-compose.yml and .env.example to .env on the host (both are not in git).
+# Folder on the host: docker-compose.yml + .env + data/ (owner 65532): data/agent.token (0600)
+# and the session history the dash writes there. Point Nginx at http://127.0.0.1:9178
+# (TLS, allow only your LAN, basic auth).
+#   check after install:  docker compose ps                   -> (healthy)
+#                         docker compose exec dash /app -check -> all checks passed
+name: ovpn-dash
+
+services:
+  dash:
+    image: vihat/ovpn-dash:0.1.1
+    restart: unless-stopped
+    environment:
+      OVPN_LISTEN: ":8080"
+      OVPN_AGENT: ${OVPN_AGENT:?set OVPN_AGENT in .env}
+      OVPN_ALERT_RATE: ${OVPN_ALERT_RATE:-5MB}
+      OVPN_RETENTION: ${OVPN_RETENTION:-90d}
+      OVPN_DATA_MAX: ${OVPN_DATA_MAX:-5GB}
+    healthcheck:
+      test: ["CMD", "/app", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    ports:
+      - "127.0.0.1:9178:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./data:/data
+    ulimits:
+      nofile: { soft: 1024, hard: 4096 }
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

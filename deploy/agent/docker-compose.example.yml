@@ -1,0 +1,39 @@
+# ovpn-agent: runs on the OpenVPN host, serves $OVPN_LISTEN.
+# Copy to docker-compose.yml and .env.example to .env on the host (both are not in git).
+# Values come from .env; add one volume line (and one .env variable) per OpenVPN profile.
+# Folder on the host: docker-compose.yml + .env + data/agent.token (root:root 0600). Nothing else.
+# Reads the management sockets only; mounts each profile's data/run/ read-only
+# (never data/ itself: it holds the PKI).
+#   check after install:  docker compose ps                    -> (healthy)
+#                         docker compose exec agent /app -check -> all checks passed
+name: ovpn-agent
+
+services:
+  agent:
+    image: vihat/ovpn-agent:0.1.1
+    restart: unless-stopped
+    network_mode: host
+    # uid 0 only to enter data/run (drwx------ root). cap_drop ALL leaves root with
+    # no capabilities: it gets in as the directory owner, nothing more.
+    user: "0:0"
+    environment:
+      OVPN_LISTEN: ${OVPN_LISTEN:?set OVPN_LISTEN in .env}
+    healthcheck:
+      test: ["CMD", "/app", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./data:/data:ro
+      # <data/run directory on the host>:/srv/ovpn/<profile name>:ro
+      - ${OVPN_RUN_PROFILE_A:?set in .env}:/srv/ovpn/profile-a:ro
+      - ${OVPN_RUN_PROFILE_B:?set in .env}:/srv/ovpn/profile-b:ro
+    ulimits:
+      nofile: { soft: 1024, hard: 4096 }
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

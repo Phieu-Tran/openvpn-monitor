@@ -1,0 +1,15 @@
+dist/
+*.token
+deploy/*/data/*
+!deploy/*/data/.gitkeep
+node_modules/
+# the built page (npm run build in cmd/ovpn-dash/ui); the placeholder keeps go:embed happy
+cmd/ovpn-dash/web/*
+!cmd/ovpn-dash/web/.gitkeep
+# the real deploy files hold IPs and mount paths: they stay in this folder (to copy to the
+# hosts) but never go to git; git has docker-compose.example.yml and .env.example
+deploy/agent/docker-compose.yml
+deploy/dash/docker-compose.yml
+deploy/*/.env
+# internal notes
+ovpn-dash-prompt.md

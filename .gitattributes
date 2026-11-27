@@ -1,0 +1,5 @@
+# LF everywhere (scripts and compose files run on Linux), whatever the local core.autocrlf.
+* text=auto eol=lf
+# Raw OpenVPN management output: keep its \r\n byte for byte.
+internal/mgmt/testdata/** -text
+*.woff2 binary

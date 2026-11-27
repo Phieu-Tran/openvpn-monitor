@@ -1,0 +1,71 @@
+# Lab only: fake OpenVPN sockets + agent + dash, built from source. Never run against production.
+# Token: generate deploy/lab/agent.token first (see README).
+name: ovpn-lab
+
+x-base: &base
+  ulimits:
+    nofile: { soft: 1024, hard: 4096 }
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-health: &health
+  test: ["CMD", "/app", "-healthcheck"]
+  interval: 30s
+  timeout: 5s
+  start_period: 10s
+  retries: 3
+
+services:
+  fake:
+    <<: *base
+    build: { context: ../.., args: { APP: ovpn-fake } }
+    image: ovpn-fake:lab
+    user: "0:0" # creates root-owned sockets, like OpenVPN does
+    command: ["-root", "/srv/ovpn"]
+    volumes:
+      - sockets:/srv/ovpn
+
+  agent:
+    <<: *base
+    build: { context: ../.., args: { APP: ovpn-agent, VERSION: lab } }
+    image: ovpn-agent:dev
+    user: "0:0" # like production: socket dirs are drwx------ root
+    environment:
+      OVPN_LISTEN: ":9177"
+      OVPN_TOKEN_FILE: /run/secrets/agent_token
+    healthcheck: *health
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - sockets:/srv/ovpn:ro
+    secrets: [agent_token]
+    ports:
+      - "127.0.0.1:9177:9177"
+
+  dash:
+    <<: *base
+    build: { context: ../.., args: { APP: ovpn-dash, VERSION: lab } }
+    image: ovpn-dash:dev
+    environment:
+      OVPN_LISTEN: ":8080"
+      OVPN_AGENT: http://agent:9177
+      OVPN_TOKEN_FILE: /run/secrets/agent_token
+    healthcheck: *health
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    secrets: [agent_token]
+    volumes:
+      - dashdata:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+
+secrets:
+  agent_token:
+    file: ./agent.token
+
+volumes:
+  sockets: {}
+  dashdata: {}

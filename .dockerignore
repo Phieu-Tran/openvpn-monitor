@@ -1,0 +1,7 @@
+*.md
+deploy
+dist
+.git
+.github
+**/node_modules
+cmd/ovpn-dash/web
