@@ -2,9 +2,9 @@ import { Card, Skeleton, Tooltip } from "@heroui/react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { Heatmap, Legend, Sparkline, TimeChart, seriesColor } from "./charts";
-import { F, M, H, PRESETS, bytes, countryName, duration, rangeKey, rangeParams, rate, relative, sum, useJSON, usePref, addr } from "./lib";
+import { F, M, H, PRESETS, appName, bytes, countryName, duration, osName, rangeKey, rangeParams, rate, relative, sum, useJSON, usePref, addr } from "./lib";
 import type { Heat, Live, LiveRow, Preset, Series } from "./lib";
-import { Badge, ColumnMenu, CountryTag, DataTable, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
+import { Badge, ColumnMenu, CountryTag, DataTable, DeviceTag, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
 const CHART_PRESETS: Preset[] = ["5m", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d", "30d", "90d"];
@@ -14,6 +14,7 @@ const sortKeys: Record<string, (s: LiveRow) => number | string> = {
   real: (s) => (s.country ?? "") + s.real_ip, since: (s) => Date.parse(s.connected_since),
   dur: (s) => -Date.parse(s.connected_since), traffic: (s) => s.bytes_rx + s.bytes_tx, rate: (s) => s.rate_rx + s.rate_tx,
   seen: (s) => (s.last_ref ? Date.parse(s.last_ref) : 0), cipher: (s) => s.cipher,
+  device: (s) => (s.device?.plat ? osName(s.device) + appName(s.device) : "~"), // unknown last
 };
 
 function Kpi({ label, icon, value, sub, tone = "accent", children }: {
@@ -73,7 +74,7 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
   const cmpKey = sortKeys[sort.k] ?? sortKeys.cn;
   const rows = all
     .filter((s) => (!profile || s.profile === profile) && (!onlyAlerts || alerting(s)) && (!needle ||
-      [s.cn, s.vpn_ip, s.vpn_ip6, s.real_ip, s.profile, s.country, s.country && countryName(s.country)].some((v) => v?.toLowerCase().includes(needle))))
+      [s.cn, s.vpn_ip, s.vpn_ip6, s.real_ip, s.profile, s.country, s.country && countryName(s.country), s.device?.plat && osName(s.device), appName(s.device)].some((v) => v?.toLowerCase().includes(needle))))
     .sort((a, b) => {
       const x = cmpKey(a), y = cmpKey(b);
       const r = typeof x === "number" ? x - (y as number) : String(x).localeCompare(String(y), undefined, { numeric: true });
@@ -91,6 +92,7 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
     { id: "proto", label: "Proto", cell: (s) => s.proto.toUpperCase() },
     { id: "vpn", label: "VPN IP", cell: (s) => <span className="mono">{s.vpn_ip}{s.vpn_ip6 && <span className="block text-xs text-muted">{s.vpn_ip6}</span>}</span> },
     { id: "real", label: "Real IP:port", cell: (s) => <><CountryTag cc={s.country} /><span className="mono">{addr(s.real_ip, s.real_port)}</span></> },
+    { id: "device", label: "Device", cell: (s) => <DeviceTag device={s.device} /> },
     { id: "since", label: "Connected", cell: (s) => <span title={F.abs.format(Date.parse(s.connected_since))}>{relative(Date.parse(s.connected_since))}</span> },
     { id: "dur", label: "Duration", num: true, cell: (s) => duration((Date.now() - Date.parse(s.connected_since)) / 1000) },
     { id: "traffic", label: "Traffic ↑ / ↓", num: true, cell: (s) => `${bytes(s.bytes_rx)} / ${bytes(s.bytes_tx)}` },
@@ -178,7 +180,7 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
 
       <Panel title="Sessions" flush actions={<>
         <Toggle label="Alerts only" value={onlyAlerts} onChange={setOnlyAlerts} />
-        <Search value={q} onChange={setQ} placeholder="CN, IP, country or profile" />
+        <Search value={q} onChange={setQ} placeholder="CN, IP, country, profile or device" />
         <ColumnMenu cols={cols} hidden={hidden} onChange={setHidden} />
       </>}>
         <div className="px-4 pb-3">

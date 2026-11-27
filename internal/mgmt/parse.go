@@ -40,6 +40,7 @@ type Client struct {
 	PeerID         int64     `json:"peer_id"`
 	Cipher         string    `json:"cipher"`
 	LastRef        time.Time `json:"last_ref,omitzero"`
+	Device         Device    `json:"device,omitzero"` // from "log all", not "status 3"
 }
 
 // Used when the output has no HEADER line for a row type (OpenVPN 2.6 defaults).

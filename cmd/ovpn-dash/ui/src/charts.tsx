@@ -77,6 +77,24 @@ const forward = (p: XY[]) => curve(p).map(([a, b, c]) => `C${f(a)} ${f(b)} ${f(c
 // the same curve walked back: every segment reversed, control points swapped
 const backward = (p: XY[]) => curve(p).map(([a, b], i) => `C${f(b)} ${f(a)} ${f(p[i])}`).reverse().join("");
 
+// smoothRuns: a triangular moving average over about 1/60 of the points on each side,
+// inside each run only (never across a gap). Short ranges (< 60 points) stay as they are.
+function smoothRuns(points: Point[], runs: [number, number][]): number[][] {
+  const k = Math.floor(points.length / 60);
+  if (k < 1) return points.map((p) => p.v);
+  return points.map((p, i) => {
+    const [a, b] = runs.find(([s, e]) => i >= s && i <= e)!;
+    const sum = p.v.map(() => 0);
+    let wsum = 0;
+    for (let j = Math.max(a, i - k); j <= Math.min(b, i + k); j++) {
+      const w = k + 1 - Math.abs(j - i);
+      points[j].v.forEach((v, s) => (sum[s] += v * w));
+      wsum += w;
+    }
+    return sum.map((v) => v / wsum);
+  });
+}
+
 export function TimeChart({ label, points, series, from, to, step, fmt, stacked, area, integer, base, floor, empty }: {
   label: string; points: Point[]; series: { name: string; color: string }[]; from: number; to: number; step: number;
   fmt: (v: number) => string; stacked?: boolean; area?: boolean; integer?: boolean; base?: number; floor: number; empty: string;
@@ -85,19 +103,20 @@ export function TimeChart({ label, points, series, from, to, step, fmt, stacked,
   const [hover, setHover] = useState<number | null>(null);
   const Hh = 220, m = { l: 62, r: 10, t: 10, b: 24 };
   const iw = W - m.l - m.r, ih = Hh - m.t - m.b;
-  // tops[s][i]: the upper edge of series s at point i (cumulative when stacked)
-  const tops = series.map((_, s) => points.map((p) => (stacked ? p.v.slice(0, s + 1).reduce((a, b) => a + b, 0) : p.v[s])));
-  const vmax = Math.max(0, ...tops.flat());
-  const ymax = nice(vmax, floor, integer, base);
-  const x = (t: number) => m.l + ((t - from) / (to - from)) * iw;
-  const y = (v: number) => m.t + ih - (v / ymax) * ih;
-
   // runs: stretches of consecutive samples; a gap in the data stays a gap.
   const runs: [number, number][] = [];
   points.forEach((p, i) => {
     if (i === 0 || p.t - points[i - 1].t > step * 2.5) runs.push([i, i]);
     else runs[runs.length - 1][1] = i;
   });
+  // The drawn shape is smoothed (the tooltip keeps the exact values): minute-to-minute
+  // jitter would otherwise read as a saw blade. tops[s][i]: upper edge of series s (cumulative when stacked).
+  const drawn = smoothRuns(points, runs);
+  const tops = series.map((_, s) => drawn.map((v) => (stacked ? v.slice(0, s + 1).reduce((a, b) => a + b, 0) : v[s])));
+  const vmax = Math.max(0, ...points.map((p) => (stacked ? p.v.reduce((a, b) => a + b, 0) : Math.max(...p.v))));
+  const ymax = nice(vmax, floor, integer, base);
+  const x = (t: number) => m.l + ((t - from) / (to - from)) * iw;
+  const y = (v: number) => m.t + ih - (v / ymax) * ih;
   const xy = (values: number[], a: number, b: number) => points.slice(a, b + 1).map((q, i): XY => [x(q.t), y(values[a + i])]);
   const edge = (values: number[], a: number, b: number) => {
     const q = xy(values, a, b);
@@ -124,11 +143,13 @@ export function TimeChart({ label, points, series, from, to, step, fmt, stacked,
     <div ref={ref} className="chart relative" style={{ height: Hh }}>
       <svg width={W} height={Hh} role="img" aria-label={`${label}, ${points.length} samples, max ${fmt(vmax)}`}>
         <defs>
-          {/* soft fills: a wash of the series colour that fades towards the baseline */}
+          {/* soft fills: each band fades from its own top edge down to the band below
+              (gradient over the band's box, not the chart's), so every band reads equally
+              clear and warm hues never thicken into brown over the dark surface */}
           {series.map((s, i) => (
-            <linearGradient key={s.name} id={`${uid}-${i}`} x1={0} x2={0} y1={m.t} y2={m.t + ih} gradientUnits="userSpaceOnUse">
-              <stop offset="0" style={{ stopColor: s.color, stopOpacity: stacked ? 0.55 : 0.3 }} />
-              <stop offset="1" style={{ stopColor: s.color, stopOpacity: stacked ? 0.3 : 0.02 }} />
+            <linearGradient key={s.name} id={`${uid}-${i}`} x1={0} x2={0} y1={0} y2={1}>
+              <stop offset="0" style={{ stopColor: s.color, stopOpacity: stacked ? 0.32 : 0.24 }} />
+              <stop offset="1" style={{ stopColor: s.color, stopOpacity: stacked ? 0.04 : 0.01 }} />
             </linearGradient>
           ))}
         </defs>
@@ -149,7 +170,7 @@ export function TimeChart({ label, points, series, from, to, step, fmt, stacked,
           <path key={`f-${s.name}-${a}`} d={fill(i, a, b)} style={{ fill: `url(#${uid}-${i})` }} />))}
         {/* each band is outlined in its own colour, not separated by dark gaps */}
         {series.map((s, i) => runs.map(([a, b]) => (
-          <path key={`l-${s.name}-${a}`} d={edge(tops[i], a, b)} className="line" style={{ stroke: s.color, strokeWidth: stacked ? 1.5 : 2 }} />
+          <path key={`l-${s.name}-${a}`} d={edge(tops[i], a, b)} className="line" style={{ stroke: s.color, strokeWidth: 1.5, strokeOpacity: 0.9 }} />
         )))}
         {p && (
           <>

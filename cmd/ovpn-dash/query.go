@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"ovpn-dash/internal/mgmt"
 )
 
 // vnOffset is Asia/Ho_Chi_Minh (UTC+7, no DST), used for days and hours.
@@ -96,7 +98,7 @@ func (s *store) eachSession(ctx context.Context, f filter, fn func(record) error
 	order := orderBy(map[string]string{
 		"cn": "cn COLLATE NOCASE", "profile": "profile", "proto": "proto", "real": "country || real_ip", "vpn": "vpn_ip",
 		"start": "started", "end": fmt.Sprintf("(CASE WHEN open THEN %d ELSE ended END)", int64(math.MaxInt64)),
-		"dur": seenUntil(now) + " - started", "traffic": "bytes_rx + bytes_tx",
+		"dur": seenUntil(now) + " - started", "traffic": "bytes_rx + bytes_tx", "device": "device",
 	}, f.sort, "start", f.desc)
 	if !strings.HasPrefix(order, "started ") {
 		order += ", started DESC"
@@ -106,7 +108,7 @@ func (s *store) eachSession(ctx context.Context, f filter, fn func(record) error
 		order = "+" + order
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT cn, profile, proto, instance, cid, real_ip, real_port, vpn_ip, started, ended,
-		bytes_rx, bytes_tx, peak, open, country FROM sessions`+where+" ORDER BY "+order+" LIMIT ? OFFSET ?",
+		bytes_rx, bytes_tx, peak, open, country, device FROM sessions`+where+" ORDER BY "+order+" LIMIT ? OFFSET ?",
 		append(args, f.limit, f.offset)...)
 	if err != nil {
 		return err
@@ -115,9 +117,13 @@ func (s *store) eachSession(ctx context.Context, f filter, fn func(record) error
 	for rows.Next() {
 		var r record
 		var start, end int64
+		var dev string
 		if err := rows.Scan(&r.CN, &r.Profile, &r.Proto, &r.Instance, &r.CID, &r.RealIP, &r.RealPort, &r.VPNIP, &start, &end,
-			&r.BytesRx, &r.BytesTx, &r.Peak, &r.Open, &r.Country); err != nil {
+			&r.BytesRx, &r.BytesTx, &r.Peak, &r.Open, &r.Country, &dev); err != nil {
 			return err
+		}
+		if dev != "" {
+			json.Unmarshal([]byte(dev), &r.Device)
 		}
 		r.Start, r.End = time.Unix(start, 0).UTC(), time.Unix(end, 0).UTC()
 		if err := fn(r); err != nil {
@@ -168,6 +174,7 @@ type user struct {
 	Online    bool      `json:"online"`
 	Countries []string  `json:"countries"`
 	IPs       int       `json:"ips"`
+	Plats     []string  `json:"plats"`             // IV_PLAT values seen
 	IPList    []string  `json:"ip_list,omitempty"` // CSV export only
 }
 
@@ -201,13 +208,14 @@ func (s *store) eachUser(ctx context.Context, f filter, ipList bool, fn func(use
 	// GROUP BY +cn below: use the range index, not the one on cn (19s vs 50ms at 3M rows).
 	order := orderBy(map[string]string{
 		"cn": "cn COLLATE NOCASE", "profiles": "profiles", "n": "n", "time": "secs", "traffic": "rx + tx",
-		"countries": "countries", "ips": "ips",
+		"countries": "countries", "ips": "ips", "plats": "plats",
 		"last": fmt.Sprintf("(CASE WHEN online THEN %d ELSE last END)", int64(math.MaxInt64)),
 	}, f.sort, "last", f.desc)
 	rows, err := s.db.QueryContext(ctx, `WITH u AS (
 		SELECT cn, group_concat(DISTINCT profile) AS profiles, count(*) AS n, sum(`+f.inRange(now)+`) AS secs,
 			sum(bytes_rx) AS rx, sum(bytes_tx) AS tx, max(peak) AS peak, max(`+seenUntil(now)+`) AS last, max(open) AS online,
-			group_concat(DISTINCT nullif(country, '')) AS countries, count(DISTINCT real_ip) AS ips, `+ips+` AS ip_list
+			group_concat(DISTINCT nullif(country, '')) AS countries, count(DISTINCT real_ip) AS ips, `+ips+` AS ip_list,
+			group_concat(DISTINCT nullif(nullif(device, '') ->> 'plat', '')) AS plats
 		FROM sessions`+where+` GROUP BY +cn`+having+`)
 		SELECT *, count(*) OVER (), sum(online) OVER (), sum(peak > ?) OVER () FROM u ORDER BY `+order+`, cn LIMIT ? OFFSET ?`,
 		append(args, f.threshold(), f.limit, f.offset)...)
@@ -219,12 +227,12 @@ func (s *store) eachUser(ctx context.Context, f filter, ipList bool, fn func(use
 		var u user
 		var t userTotals
 		var last int64
-		var profiles, countries, list sql.NullString
+		var profiles, countries, list, plats sql.NullString
 		if err := rows.Scan(&u.CN, &profiles, &u.Sessions, &u.Seconds, &u.BytesRx, &u.BytesTx, &u.Peak, &last, &u.Online,
-			&countries, &u.IPs, &list, &t.Total, &t.Online, &t.Alerts); err != nil {
+			&countries, &u.IPs, &list, &plats, &t.Total, &t.Online, &t.Alerts); err != nil {
 			return err
 		}
-		u.Profiles, u.Countries, u.LastSeen = splitList(profiles), splitList(countries), time.Unix(last, 0).UTC()
+		u.Profiles, u.Countries, u.Plats, u.LastSeen = splitList(profiles), splitList(countries), splitList(plats), time.Unix(last, 0).UTC()
 		if ipList {
 			u.IPList = splitList(list)
 		}
@@ -250,10 +258,18 @@ type dayUse struct {
 	BytesTx uint64 `json:"bytes_tx"`
 }
 
+type deviceSeen struct {
+	mgmt.Device
+	First    time.Time `json:"first"`
+	Last     time.Time `json:"last"`
+	Sessions int       `json:"sessions"`
+}
+
 type userDetail struct {
-	Sessions []record `json:"sessions"` // newest 500
-	IPs      []ipSeen `json:"ips"`      // newest 100
-	Days     []dayUse `json:"days"`
+	Sessions []record     `json:"sessions"` // newest 500
+	IPs      []ipSeen     `json:"ips"`      // newest 100
+	Devices  []deviceSeen `json:"devices"`  // newest 20; sessions with an unknown device left out
+	Days     []dayUse     `json:"days"`
 }
 
 // userDetail is everything about one CN inside the range.
@@ -264,7 +280,7 @@ func (s *store) userDetail(ctx context.Context, f filter) (d userDetail, err err
 	}
 	now := time.Now()
 	where, args := f.where(now)
-	d.IPs, d.Days = []ipSeen{}, []dayUse{}
+	d.IPs, d.Days, d.Devices = []ipSeen{}, []dayUse{}, []deviceSeen{}
 	rows, err := s.db.QueryContext(ctx, `SELECT real_ip, max(country), min(started), max(`+seenUntil(now)+`) AS last, count(*),
 		sum(bytes_rx + bytes_tx) FROM sessions`+where+` GROUP BY real_ip ORDER BY last DESC LIMIT 100`, args...)
 	if err != nil {
@@ -281,6 +297,26 @@ func (s *store) userDetail(ctx context.Context, f filter) (d userDetail, err err
 		d.IPs = append(d.IPs, p)
 	}
 	if err := rows.Err(); err != nil {
+		return d, err
+	}
+	devs, err := s.db.QueryContext(ctx, `SELECT device, min(started), max(`+seenUntil(now)+`) AS last, count(*)
+		FROM sessions`+where+` AND device <> '' GROUP BY device ORDER BY last DESC LIMIT 20`, args...)
+	if err != nil {
+		return d, err
+	}
+	defer devs.Close()
+	for devs.Next() {
+		var v deviceSeen
+		var dev string
+		var first, last int64
+		if err := devs.Scan(&dev, &first, &last, &v.Sessions); err != nil {
+			return d, err
+		}
+		json.Unmarshal([]byte(dev), &v.Device)
+		v.First, v.Last = time.Unix(first, 0).UTC(), time.Unix(last, 0).UTC()
+		d.Devices = append(d.Devices, v)
+	}
+	if err := devs.Err(); err != nil {
 		return d, err
 	}
 	days, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT date(started + %d, 'unixepoch') AS day, sum(bytes_rx), sum(bytes_tx)

@@ -13,8 +13,10 @@ UDP/TCP, VPN IP, real IP, traffic, rate), plus session history, per-user summari
 ```
 
 - **ovpn-agent** (image `vihat/ovpn-agent`): every 5s connects to each management socket,
-  sends `status 3`, reads until `END`, sends `quit`, closes. Never keeps the socket open, never
-  sends anything else. Serves `GET /api/v1/sessions`, `GET /metrics` (bearer token), `GET /healthz`.
+  sends `status 3` and `log all` (each read until `END`), sends `quit`, closes. Never keeps the
+  socket open, never sends anything else. `log all` only reads OpenVPN's log cache: the
+  `peer info` lines (verb 3 or higher) tell each client's device (OS, app, OpenVPN version;
+  self-reported, not verified). A session whose lines already left the cache has no device. Serves `GET /api/v1/sessions`, `GET /metrics` (bearer token), `GET /healthz`.
 - **ovpn-dash** (image `vihat/ovpn-dash`): web UI (React + HeroUI, embedded in the binary) with
   three views, Online / History / Users: live table, charts, weekday x hour heatmap, session and
   user details, quick search (Ctrl+K), light/dark, filters and CSV export. Polls the agent
@@ -108,7 +110,7 @@ T=$(cat agent.token)
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9177/api/v1/sessions                          # 401
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $T" http://127.0.0.1:9177/api/v1/sessions  # 200
 curl -s http://127.0.0.1:9177/healthz                                                                    # ok
-docker compose logs fake | grep 'conn close' | tail -3    # cmds=["status 3" "quit"], closed after ~1ms
+docker compose logs fake | grep 'conn close' | tail -3    # cmds=["status 3" "log all" "quit"], closed after ~1ms
 docker compose exec fake /app -query /srv/ovpn/sale/mgmt-udp.sock   # a second client still gets in
 curl -s -H "Authorization: Bearer $T" http://127.0.0.1:9177/metrics \
   | docker run --rm -i --entrypoint promtool prom/prometheus:v3.5.0 check metrics   # no output, exit 0
@@ -336,7 +338,8 @@ Cleanup: `docker compose down` in `/opt/ovpn-agent`, `/opt/ovpn-dash` and `/srv/
    "up": true, "last_error": "", "last_ok": "...", "version": "2.6.20",
    "sessions": [{"cn": "...", "real_ip": "...", "real_port": 51234, "vpn_ip": "10.8.0.2", "vpn_ip6": "",
      "bytes_rx": 0, "bytes_tx": 0, "rate_rx": 0, "rate_tx": 0, "connected_since": "...",
-     "cid": 5, "peer_id": 0, "cipher": "AES-256-GCM", "last_ref": "..."}]}]}
+     "cid": 5, "peer_id": 0, "cipher": "AES-256-GCM", "last_ref": "...",
+     "device": {"plat": "win", "plat_ver": "10.0.22631", "gui": "OpenVPN_GUI_11", "ver": "2.6.12"}}]}]}
 ```
 
 Bytes and rates are from the server's side: `rx` = from the client (upload), `tx` = to the client.

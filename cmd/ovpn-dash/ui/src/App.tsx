@@ -175,7 +175,7 @@ export function App() {
       </div>
 
       {session && <SessionDrawer session={current ?? session} online={!!current || !!live.error} onUser={openUser} onClose={() => setSession(undefined)} />}
-      {user && <UserDrawer cn={user} onSessions={showSessions} onClose={() => setUser("")} />}
+      {user && <UserDrawer cn={user} profiles={profiles} onSessions={showSessions} onClose={() => setUser("")} />}
       {finding && <QuickSearch live={rows} onUser={openUser} onClose={() => setFinding(false)} />}
     </div>
   );

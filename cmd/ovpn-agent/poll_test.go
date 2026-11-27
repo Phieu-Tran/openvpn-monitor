@@ -15,7 +15,8 @@ import (
 	"time"
 )
 
-// serveFake answers "status 3" with one client whose byte counters grow by 1000 per call.
+// serveFake answers "status 3" with one client whose byte counters grow by 1000 per call,
+// and "log all" with that client's peer info on the first call only (then the cache rolled over).
 func serveFake(t *testing.T, path string) net.Listener {
 	t.Helper()
 	os.MkdirAll(filepath.Dir(path), 0o755)
@@ -23,7 +24,7 @@ func serveFake(t *testing.T, path string) net.Listener {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var calls atomic.Uint64
+	var calls, logs atomic.Uint64
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -33,6 +34,13 @@ func serveFake(t *testing.T, path string) net.Listener {
 			io.WriteString(c, ">INFO:OpenVPN Management Interface Version 5\r\n")
 			sc := bufio.NewScanner(c)
 			for sc.Scan() && sc.Text() != "quit" {
+				if sc.Text() == "log all" {
+					if logs.Add(1) == 1 {
+						io.WriteString(c, "1700000000,I,1.2.3.4:5 peer info: IV_VER=2.6.12\r\n1700000000,I,1.2.3.4:5 peer info: IV_PLAT=win\r\n")
+					}
+					io.WriteString(c, "END\r\n")
+					continue
+				}
 				n := calls.Add(1) * 1000
 				fmt.Fprintf(c, "TITLE\tOpenVPN 2.6.20 x\r\nCLIENT_LIST\talice\t1.2.3.4:5\t10.8.0.2\t\t%d\t%d\tx\t1700000000\tUNDEF\t1\t0\tAES-256-GCM\r\nEND\r\n", n, 2*n)
 			}
@@ -87,6 +95,9 @@ func TestPollerEndToEnd(t *testing.T) {
 	}
 	if s := in.Sessions[0]; s.RateRx <= 0 || s.RateTx <= s.RateRx {
 		t.Errorf("rates rx=%v tx=%v", s.RateRx, s.RateTx)
+	}
+	if d := in.Sessions[0].Device; d.Plat != "win" || d.Ver != "2.6.12" {
+		t.Errorf("device not kept after the log rolled over: %+v", d)
 	}
 	m := get("/metrics", "0123456789abcdef").Body.String()
 	if !strings.Contains(m, `ovpn_client_bytes_received_total{instance="openvpn-udp-all-dev-v2",profile="all-dev",proto="udp",cn="alice"} 2000`) {

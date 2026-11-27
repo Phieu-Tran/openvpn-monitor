@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,7 @@ func seedHistory(dir string, days int) error {
 						"vpn_ip": fmt.Sprintf("10.%d.0.%d", 8+slices.Index(profiles, profile), 50+i),
 						"start":  sp.start.UTC(), "end": sp.end.UTC(),
 						"bytes_rx": int64(sp.rx * sec), "bytes_tx": int64(sp.tx * sec), "peak_rate": (sp.rx + sp.tx) * (1 + 5*rand.Float64()),
+						"device": deviceJSON(deviceFor(cn)),
 					})
 				}
 			}
@@ -88,6 +90,17 @@ func seedHistory(dir string, days int) error {
 	}
 	fmt.Printf("seeded %d sessions, %d samples into %s\n", len(sessions), len(samples), dir)
 	return nil
+}
+
+// deviceJSON turns peer info lines into the JSON of mgmt.Device.
+func deviceJSON(kv []string) map[string]string {
+	names := map[string]string{"IV_PLAT": "plat", "IV_PLAT_VER": "plat_ver", "IV_GUI_VER": "gui", "IV_VER": "ver", "IV_HWADDR": "hwaddr"}
+	d := map[string]string{}
+	for _, l := range kv {
+		k, v, _ := strings.Cut(l, "=")
+		d[names[k]] = v
+	}
+	return d
 }
 
 func writeLines[T any](path string, rows []T) error {

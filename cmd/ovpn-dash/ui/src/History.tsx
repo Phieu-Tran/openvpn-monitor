@@ -3,7 +3,7 @@ import { Button, Card, DateField, DateRangePicker, Pagination, RangeCalendar } f
 import { useEffect, useState } from "react";
 import { F, PRESETS, TZ, addr, bytes, countryName, duration, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
 import type { Facets, History, Preset, Range, SessionRecord, UserRow, Users } from "./lib";
-import { Badge, CountryTag, DataTable, Icon, Panel, Picker, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
+import { Badge, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
 export interface Filters { range: Range; q: string; profile: string; proto: string; country: string; alerts: boolean }
@@ -129,6 +129,7 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
     { id: "proto", label: "Proto", cell: (x) => x.proto.toUpperCase() },
     { id: "real", label: "Real IP", cell: (x) => <><CountryTag cc={x.country} /><span className="mono">{addr(x.real_ip, x.real_port)}</span></> },
     { id: "vpn", label: "VPN IP", cell: (x) => <span className="mono">{x.vpn_ip}</span> },
+    { id: "device", label: "Device", cell: (x) => <DeviceTag device={x.device} compact /> },
     { id: "start", label: "Start", cell: (x) => <span title={F.abs.format(Date.parse(x.start))}>{F.dmhm.format(Date.parse(x.start))}</span> },
     { id: "end", label: "End", cell: (x) => (x.open ? <Badge tone="success">online now</Badge> : <span title={F.abs.format(end(x))}>{F.dmhm.format(end(x))}</span>) },
     { id: "dur", label: "Duration", num: true, cell: (x) => duration((end(x) - Date.parse(x.start)) / 1000) },
@@ -167,6 +168,7 @@ export function UserList({ filters, setFilters, facets, alertRate, onUser, profi
     { id: "traffic", label: "Traffic ↑ / ↓", num: true, cell: (u) => `${bytes(u.bytes_rx)} / ${bytes(u.bytes_tx)}` },
     { id: "countries", label: "Countries", cell: (u) => u.countries.map((c) => <CountryTag key={c} cc={c} />) },
     { id: "ips", label: "Real IPs", num: true, cell: (u) => u.ips },
+    { id: "plats", label: "Devices", cell: (u) => <span className="flex items-center gap-1.5">{u.plats.length ? u.plats.map((p) => <DeviceIcon key={p} plat={p} />) : <span className="text-muted">–</span>}</span> },
     { id: "last", label: "Last seen", cell: (u) => (u.online ? <Badge tone="success">online now</Badge>
       : <span title={F.abs.format(Date.parse(u.last_seen))}>{relative(Date.parse(u.last_seen))}</span>) },
   ];

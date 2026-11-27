@@ -49,21 +49,22 @@ type agentSession struct {
 // record is one VPN session. End is the last poll that saw it, so a closed
 // session's end is accurate to one poll interval.
 type record struct {
-	CN       string    `json:"cn"`
-	Profile  string    `json:"profile"`
-	Proto    string    `json:"proto"`
-	Instance string    `json:"instance"`
-	CID      uint64    `json:"cid"`
-	RealIP   string    `json:"real_ip"`
-	RealPort int       `json:"real_port"`
-	VPNIP    string    `json:"vpn_ip"`
-	Start    time.Time `json:"start"`
-	End      time.Time `json:"end"`
-	BytesRx  uint64    `json:"bytes_rx"`
-	BytesTx  uint64    `json:"bytes_tx"`
-	Peak     float64   `json:"peak_rate,omitempty"` // highest up+down bytes/s seen
-	Open     bool      `json:"open,omitempty"`
-	Country  string    `json:"country,omitempty"`
+	CN       string      `json:"cn"`
+	Profile  string      `json:"profile"`
+	Proto    string      `json:"proto"`
+	Instance string      `json:"instance"`
+	CID      uint64      `json:"cid"`
+	RealIP   string      `json:"real_ip"`
+	RealPort int         `json:"real_port"`
+	VPNIP    string      `json:"vpn_ip"`
+	Start    time.Time   `json:"start"`
+	End      time.Time   `json:"end"`
+	BytesRx  uint64      `json:"bytes_rx"`
+	BytesTx  uint64      `json:"bytes_tx"`
+	Peak     float64     `json:"peak_rate,omitempty"` // highest up+down bytes/s seen
+	Open     bool        `json:"open,omitempty"`
+	Country  string      `json:"country,omitempty"`
+	Device   mgmt.Device `json:"device,omitzero"`
 }
 
 // point is one sample for the charts.
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   bytes_tx  INTEGER NOT NULL,
   peak      REAL    NOT NULL,
   open      INTEGER NOT NULL,
+  device    TEXT    NOT NULL DEFAULT '', -- JSON mgmt.Device, '' = unknown
   UNIQUE (instance, cid, started)
 );
 CREATE INDEX IF NOT EXISTS sessions_started ON sessions (started);
@@ -176,6 +178,18 @@ func openStore(dir string, retention time.Duration, maxBytes int64, country func
 		db.Close()
 		return nil, fmt.Errorf("database in %s cannot be written (owner must be uid 65532): %w", dir, err)
 	}
+	// ovpn-dash 0.1.2 and older: no device column.
+	var hasDevice bool
+	if err := db.QueryRow("SELECT count(*) FROM pragma_table_info('sessions') WHERE name = 'device'").Scan(&hasDevice); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if !hasDevice {
+		if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN device TEXT NOT NULL DEFAULT ''"); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if err := s.importJSONL(country); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("importing the old history files: %w", err)
@@ -195,15 +209,21 @@ func openStore(dir string, retention time.Duration, maxBytes int64, country func
 }
 
 const upsertSQL = `INSERT INTO sessions
- (instance, cid, started, ended, cn, profile, proto, real_ip, real_port, vpn_ip, country, bytes_rx, bytes_tx, peak, open)
- VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ (instance, cid, started, ended, cn, profile, proto, real_ip, real_port, vpn_ip, country, bytes_rx, bytes_tx, peak, open, device)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
  ON CONFLICT (instance, cid, started) DO UPDATE SET ended = excluded.ended, bytes_rx = excluded.bytes_rx,
    bytes_tx = excluded.bytes_tx, peak = max(peak, excluded.peak), open = excluded.open,
-   country = CASE WHEN country = '' THEN excluded.country ELSE country END`
+   country = CASE WHEN country = '' THEN excluded.country ELSE country END,
+   device = CASE WHEN excluded.device = '' THEN device ELSE excluded.device END`
 
 func upsert(st *sql.Stmt, r record) error {
+	dev := ""
+	if r.Device != (mgmt.Device{}) {
+		b, _ := json.Marshal(r.Device)
+		dev = string(b)
+	}
 	_, err := st.Exec(r.Instance, int64(r.CID), r.Start.Unix(), r.End.Unix(), r.CN, r.Profile, r.Proto,
-		r.RealIP, r.RealPort, r.VPNIP, r.Country, int64(r.BytesRx), int64(r.BytesTx), r.Peak, r.Open)
+		r.RealIP, r.RealPort, r.VPNIP, r.Country, int64(r.BytesRx), int64(r.BytesTx), r.Peak, r.Open, dev)
 	return err
 }
 
@@ -342,7 +362,7 @@ func (s *store) write(r agentResp, now time.Time) error {
 		for _, c := range in.Sessions {
 			err := upsert(st, record{CN: c.CN, Profile: in.Profile, Proto: in.Proto, Instance: in.Name, CID: c.CID,
 				RealIP: c.RealIP, RealPort: c.RealPort, VPNIP: c.VPNIP, Start: c.ConnectedSince, End: now,
-				BytesRx: c.BytesRx, BytesTx: c.BytesTx, Peak: c.RateRx + c.RateTx, Open: true, Country: c.Country})
+				BytesRx: c.BytesRx, BytesTx: c.BytesTx, Peak: c.RateRx + c.RateTx, Open: true, Country: c.Country, Device: c.Device})
 			if err != nil {
 				return err
 			}

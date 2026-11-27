@@ -6,7 +6,11 @@ export const VN = 7 * H; // UTC+7, no DST
 
 // ---------- API types
 
+// What the client reported about itself (OpenVPN IV_* peer info). Self-reported, not verified.
+export interface Device { plat?: string; plat_ver?: string; gui?: string; ver?: string; hwaddr?: string }
+
 export interface LiveSession {
+  device?: Device;
   cn: string; username?: string; real_ip: string; real_port: number; vpn_ip: string; vpn_ip6: string;
   bytes_rx: number; bytes_tx: number; rate_rx: number; rate_tx: number; connected_since: string;
   cid: number; peer_id: number; cipher: string; last_ref?: string; country?: string;
@@ -21,7 +25,7 @@ export type LiveRow = LiveSession & { instance: string; profile: string; proto: 
 export interface SessionRecord {
   cn: string; profile: string; proto: string; instance: string; cid: number; real_ip: string; real_port: number;
   vpn_ip: string; start: string; end: string; bytes_rx: number; bytes_tx: number; peak_rate?: number;
-  open?: boolean; country?: string;
+  open?: boolean; country?: string; device?: Device;
 }
 export interface History {
   sessions: SessionRecord[];
@@ -29,12 +33,13 @@ export interface History {
 }
 export interface UserRow {
   cn: string; profiles: string[]; sessions: number; online_seconds: number; bytes_rx: number; bytes_tx: number;
-  peak_rate: number; last_seen: string; online: boolean; countries: string[]; ips: number;
+  peak_rate: number; last_seen: string; online: boolean; countries: string[]; ips: number; plats: string[];
 }
 export interface Users { users: UserRow[]; summary: { total: number; online: number; alerts: number } }
 export interface UserDetail {
   sessions: SessionRecord[];
   ips: { ip: string; country?: string; first: string; last: string; sessions: number; bytes: number }[];
+  devices: (Device & { first: string; last: string; sessions: number })[];
   days: { day: string; bytes_rx: number; bytes_tx: number }[];
 }
 export interface Series {
@@ -112,6 +117,33 @@ export const countryName = (cc: string) => {
   try { return regionNames?.of(cc) ?? cc; } catch { return cc; }
 };
 export const flagEmoji = (cc: string) => String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+
+// ---------- devices
+
+const PLATS: Record<string, string> = { win: "Windows", mac: "macOS", ios: "iOS", android: "Android", linux: "Linux" };
+export const platName = (p?: string) => (p ? PLATS[p] ?? p : "Unknown");
+
+// osName: "Windows 11", "macOS 14.6.1", "Android 14"; Windows 11 still reports 10.0, the build tells them apart.
+export function osName(d?: Device) {
+  if (!d?.plat) return "Unknown";
+  const v = d.plat_ver;
+  if (d.plat === "win" && v) { const build = Number(v.split(".")[2]); return build >= 22000 ? "Windows 11" : build ? "Windows 10" : "Windows"; }
+  if (d.plat === "linux" || !v) return platName(d.plat); // linux sends the kernel version: shown apart
+  return `${platName(d.plat)} ${v}`;
+}
+
+// appName turns IV_GUI_VER (or IV_VER without a GUI) into the client app people know.
+export function appName(d?: Device) {
+  const g = d?.gui ?? "";
+  const ver = (re: RegExp) => g.match(re)?.[1] ?? "";
+  if (g.startsWith("OpenVPN_GUI")) return `OpenVPN GUI ${ver(/^OpenVPN_GUI_([\d.]+)/)}`.trim();
+  if (/^OC(Windows|macOS)_|^net\.openvpn\.connect\./.test(g)) return `OpenVPN Connect ${ver(/_([\d.]+)/)}`.trim();
+  if (g.startsWith("de.blinkt.openvpn")) return `OpenVPN for Android ${ver(/_([\d.]+)/)}`.trim();
+  if (g.startsWith("Tunnelblick")) return `Tunnelblick ${ver(/^Tunnelblick_([\d.]+)/)}`.trim();
+  if (g) return g.replace(/_/g, " ");
+  if (!d?.ver) return "";
+  return d.ver.startsWith("3.") ? "OpenVPN 3 client" : `OpenVPN ${d.ver}`;
+}
 
 // ---------- data
 

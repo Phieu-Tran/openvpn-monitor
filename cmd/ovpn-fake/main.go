@@ -48,6 +48,35 @@ type client struct {
 	cid                 uint64
 	peer                int
 	cipher              string
+	dev                 []string // peer info "KEY=VALUE" lines; nil = not in the log cache any more
+}
+
+// Plausible peer info of the clients people really use.
+var devices = [][]string{
+	{"IV_VER=2.6.12", "IV_PLAT=win", "IV_PLAT_VER=10.0.22631", "IV_GUI_VER=OpenVPN_GUI_11", "IV_HWADDR=3c:52:82:1a:4f:0e"},
+	{"IV_VER=2.6.10", "IV_PLAT=win", "IV_GUI_VER=OpenVPN_GUI_11"},
+	{"IV_VER=3.git::d3f8b18b:Release", "IV_PLAT=win", "IV_PLAT_VER=10.0.26100", "IV_GUI_VER=OCWindows_3.5.0-3818"},
+	{"IV_VER=2.6.11", "IV_PLAT=mac", "IV_PLAT_VER=14.6.1", "IV_GUI_VER=Tunnelblick_4.0.1_build_5971"},
+	{"IV_VER=3.git::d3f8b18b:Release", "IV_PLAT=mac", "IV_PLAT_VER=15.1", "IV_GUI_VER=OCmacOS_3.6.0-5432"},
+	{"IV_VER=2.6.9", "IV_PLAT=linux"},
+	{"IV_VER=3.git::58b92569", "IV_PLAT=android", "IV_PLAT_VER=14", "IV_GUI_VER=net.openvpn.connect.android_3.4.1-9632"},
+	{"IV_VER=2.6.12", "IV_PLAT=android", "IV_PLAT_VER=13", "IV_GUI_VER=de.blinkt.openvpn_0.7.51"},
+	{"IV_VER=3.git::58b92569", "IV_PLAT=ios", "IV_PLAT_VER=17.5.1", "IV_GUI_VER=net.openvpn.connect.ios_3.4.2-5622"},
+}
+
+// deviceFor: each user mostly connects from the same machine, sometimes from another (a phone).
+func deviceFor(cn string) []string {
+	switch r := rand.IntN(10); {
+	case r == 0:
+		return nil
+	case r <= 2:
+		return devices[rand.IntN(len(devices))]
+	}
+	h := 0
+	for _, b := range cn {
+		h = h*31 + int(b)
+	}
+	return devices[h%len(devices)]
 }
 
 type inst struct {
@@ -189,6 +218,8 @@ func (in *inst) serve(c net.Conn) {
 			return
 		case "status 3":
 			io.WriteString(c, in.status())
+		case "log all":
+			io.WriteString(c, in.log())
 		default:
 			io.WriteString(c, "ERROR: unknown command, enter 'help' for more options\r\n")
 		}
@@ -242,6 +273,7 @@ func (in *inst) addCN(cn string, since time.Time) {
 		cipher: "AES-256-GCM",
 		rx:     uint64(rand.IntN(50 << 20)),
 		tx:     uint64(rand.IntN(400 << 20)),
+		dev:    deviceFor(cn),
 	}
 	switch rand.IntN(6) {
 	case 0: // native IPv6 client: OpenVPN prints it without a port
@@ -305,6 +337,20 @@ func (in *inst) status() string {
 	w("GLOBAL_STATS", "Max bcast/mcast queue length", "0")
 	w("GLOBAL_STATS", "dco_enabled", "0")
 	w("END")
+	return b.String()
+}
+
+// log renders "log all": the peer info lines OpenVPN (verb 3) logs at each handshake.
+func (in *inst) log() string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	var b strings.Builder
+	for _, c := range in.clients {
+		for _, kv := range c.dev {
+			fmt.Fprintf(&b, "%d,I,%s peer info: %s\r\n", c.since.Unix(), c.real, kv)
+		}
+	}
+	b.WriteString("END\r\n")
 	return b.String()
 }
 

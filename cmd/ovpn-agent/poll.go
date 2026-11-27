@@ -47,6 +47,7 @@ type sessKey struct {
 type sample struct {
 	rx, tx uint64
 	at     time.Time
+	dev    mgmt.Device // seen once while the "peer info" lines were in the log cache
 }
 
 type snapshot struct{ json, metrics []byte }
@@ -126,8 +127,11 @@ func (p *poller) pollOne(in *instance) {
 			if dt := now.Sub(old.at).Seconds(); dt > 0 {
 				s.RateRx, s.RateTx = rate(c.BytesRx, old.rx, dt), rate(c.BytesTx, old.tx, dt)
 			}
+			if s.Device == (mgmt.Device{}) {
+				s.Device = old.dev
+			}
 		}
-		in.prev[k] = sample{c.BytesRx, c.BytesTx, now}
+		in.prev[k] = sample{c.BytesRx, c.BytesTx, now, s.Device}
 		in.Sessions = append(in.Sessions, s)
 	}
 }

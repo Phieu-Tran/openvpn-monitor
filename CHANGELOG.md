@@ -4,6 +4,23 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## Unreleased
+
+### Added
+
+- Device of each session (OS with logo, OS version, app, OpenVPN version, MAC when sent), from
+  the `peer info` lines in OpenVPN's log cache: the agent now also sends `log all` on the same
+  connection. Needs verb 3 or higher on the server; self-reported by the client, not verified.
+- Device column in Online and History, device logos in Users, a Device section in the session
+  panel. The user panel now shows online sessions, a 30-day summary, devices and recent sessions.
+- CSV: `device` column in sessions, `platforms` in users.
+- Existing databases get the new `device` column on start; older sessions show "–".
+
+### Changed
+
+- Charts: the drawn line is a moving average (ranges of 60+ points; the tooltip keeps the
+  exact values), and each stacked band fades from its own top edge, so the colours stay clear.
+
 ## 0.1.2 - 2026-11-27
 
 ### Security

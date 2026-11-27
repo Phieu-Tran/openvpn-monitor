@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -290,7 +291,7 @@ func (a *api) historyCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	f.limit, f.offset = -1, 0
 	exportCSV(w, r, fileName("sessions", f), []string{"cn", "profile", "proto", "country", "real_ip", "real_port", "vpn_ip",
-		"start", "end", "duration_s", "bytes_from_client", "bytes_to_client", "alerts"},
+		"start", "end", "duration_s", "bytes_from_client", "bytes_to_client", "alerts", "device"},
 		func(write func(...string) error) error {
 			now := time.Now()
 			return a.store.eachSession(r.Context(), f, func(s record) error {
@@ -299,7 +300,8 @@ func (a *api) historyCSV(w http.ResponseWriter, r *http.Request) {
 					end, until = "online", now
 				}
 				return write(s.CN, s.Profile, s.Proto, s.Country, s.RealIP, strconv.Itoa(s.RealPort), s.VPNIP, csvTime(s.Start), end,
-					strconv.FormatInt(int64(until.Sub(s.Start).Seconds()), 10), u64(s.BytesRx), u64(s.BytesTx), a.alertText(s.Peak))
+					strconv.FormatInt(int64(until.Sub(s.Start).Seconds()), 10), u64(s.BytesRx), u64(s.BytesTx), a.alertText(s.Peak),
+					strings.Join(slices.DeleteFunc([]string{s.Device.Plat, s.Device.PlatVer, s.Device.GUI}, func(v string) bool { return v == "" }), " "))
 			})
 		})
 }
@@ -311,7 +313,7 @@ func (a *api) usersCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	f.limit, f.offset = -1, 0
 	exportCSV(w, r, fileName("users", f), []string{"cn", "profiles", "sessions", "time_online_s", "bytes_from_client",
-		"bytes_to_client", "countries", "real_ips", "last_seen", "alerts"},
+		"bytes_to_client", "countries", "real_ips", "last_seen", "alerts", "platforms"},
 		func(write func(...string) error) error {
 			return a.store.eachUser(r.Context(), f, true, func(u user, _ userTotals) error {
 				last := csvTime(u.LastSeen)
@@ -319,7 +321,7 @@ func (a *api) usersCSV(w http.ResponseWriter, r *http.Request) {
 					last = "online"
 				}
 				return write(u.CN, strings.Join(u.Profiles, " "), strconv.Itoa(u.Sessions), strconv.FormatInt(u.Seconds, 10),
-					u64(u.BytesRx), u64(u.BytesTx), strings.Join(u.Countries, " "), strings.Join(u.IPList, " "), last, a.alertText(u.Peak))
+					u64(u.BytesRx), u64(u.BytesTx), strings.Join(u.Countries, " "), strings.Join(u.IPList, " "), last, a.alertText(u.Peak), strings.Join(u.Plats, " "))
 			})
 		})
 }

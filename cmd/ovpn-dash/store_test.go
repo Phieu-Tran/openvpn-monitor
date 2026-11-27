@@ -356,3 +356,39 @@ func TestRetentionFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreDevice(t *testing.T) {
+	dir := t.TempDir()
+	// A database of ovpn-dash 0.1.2: no device column.
+	db, err := openDB(filepath.Join(dir, "ovpn-dash.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(strings.Replace(schema, "  device    TEXT    NOT NULL DEFAULT '', -- JSON mgmt.Device, '' = unknown\n", "", 1)); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s := open(t, dir, 90*24*time.Hour, 0)
+
+	win := mgmt.Device{Plat: "win", PlatVer: "10.0.22631", GUI: "OpenVPN_GUI_11", Ver: "2.6.12"}
+	r := resp(true, 1, 2)
+	r.Instances[0].Sessions[0].Device = win
+	s.observe(r, at(0))
+	s.observe(resp(true, 1, 2), at(1)) // log rolled over: no device this poll, the stored one stays
+	got := list(t, s, all)
+	if len(got) != 2 || got[1].CN != "u1" || got[1].Device != win || got[0].Device != (mgmt.Device{}) {
+		t.Fatalf("sessions: %+v", got)
+	}
+	d, err := s.userDetail(context.Background(), filter{from: at(-60), to: at(600), cn: "u1"})
+	if err != nil || len(d.Devices) != 1 || d.Devices[0].Device != win || d.Devices[0].Sessions != 1 {
+		t.Fatalf("detail devices: %+v %v", d.Devices, err)
+	}
+	var plats []string
+	s.eachUser(context.Background(), all, false, func(u user, _ userTotals) error {
+		plats = append(plats, u.CN+"="+strings.Join(u.Plats, ","))
+		return nil
+	})
+	if strings.Join(plats, " ") != "u1=win u2=" && strings.Join(plats, " ") != "u2= u1=win" {
+		t.Fatalf("user plats: %v", plats)
+	}
+}

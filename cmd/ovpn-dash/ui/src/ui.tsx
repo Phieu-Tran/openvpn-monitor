@@ -3,8 +3,10 @@ import {
   Button, Card, Chip, Dropdown, Label, ListBox, SearchField, Select, Switch, Table, ToggleButton, ToggleButtonGroup, toast,
 } from "@heroui/react";
 import type { ReactNode } from "react";
+import { siAndroid, siApple, siLinux } from "simple-icons";
 import { seriesColor } from "./charts";
-import { countryName, flagEmoji } from "./lib";
+import { appName, countryName, flagEmoji, osName, platName } from "./lib";
+import type { Device } from "./lib";
 
 // A profile keeps one colour everywhere (charts, tags, row accents): its position in the
 // sorted list of all known profiles.
@@ -205,8 +207,43 @@ export const ICONS = {
   left: "M15 6l-6 6 6 6",
   download: "M12 4v11M7 10l5 5 5-5M5 20h14",
   right: "M9 6l6 6-6 6",
+  device: "M5 5h14v10H5zM2 19h20M10 15v4M14 15v4",
 };
 export const Icon = ({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) => (
   <svg viewBox="0 0 24 24" className={`${className} shrink-0`} fill="none" stroke="currentColor" strokeWidth={1.8}
     strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={ICONS[name]} /></svg>
 );
+
+// OS logos (Simple Icons, CC0; Windows drawn here). Brand colour where it reads on both themes,
+// the text colour for the black/yellow ones.
+const LOGOS: Record<string, { path: string; color: string }> = {
+  win: { path: "M3 3h8.6v8.6H3zM12.4 3H21v8.6h-8.6zM3 12.4h8.6V21H3zM12.4 12.4H21V21h-8.6z", color: "#0078d4" },
+  mac: { path: siApple.path, color: "currentColor" },
+  ios: { path: siApple.path, color: "currentColor" },
+  android: { path: siAndroid.path, color: "#3ddc84" },
+  linux: { path: siLinux.path, color: "currentColor" },
+};
+
+export function DeviceIcon({ plat, className = "size-4" }: { plat?: string; className?: string }) {
+  const logo = plat ? LOGOS[plat] : undefined;
+  if (!logo) return <span title={platName(plat)} className="inline-flex text-muted"><Icon name="device" className={className} /></span>;
+  return (
+    <svg viewBox="0 0 24 24" className={`${className} shrink-0`} fill={logo.color} role="img" aria-label={platName(plat)}>
+      <title>{platName(plat)}</title><path d={logo.path} />
+    </svg>
+  );
+}
+
+// DeviceTag: logo + OS, the app below; the full peer info in the tooltip.
+export function DeviceTag({ device: d, compact }: { device?: Device; compact?: boolean }) {
+  if (!d?.plat) return <span className="text-xs text-muted" title="The client's peer info was not in OpenVPN's log">–</span>;
+  const app = appName(d);
+  const title = [osName(d), d.plat === "linux" && d.plat_ver, app, d.ver && `OpenVPN core ${d.ver}`].filter(Boolean).join("\n");
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={title}>
+      <DeviceIcon plat={d.plat} />
+      {compact ? <span className="text-sm">{osName(d)}</span>
+        : <span className="leading-tight"><span className="block text-sm">{osName(d)}</span>{app && <span className="block text-xs text-muted">{app}</span>}</span>}
+    </span>
+  );
+}
