@@ -1,5 +1,5 @@
 # One Dockerfile for all binaries:
-#   docker build --build-arg APP=ovpn-agent --build-arg VERSION=0.1.1 -t vihat/ovpn-agent:0.1.1 .
+#   docker build --build-arg APP=ovpn-agent --build-arg VERSION=0.1.2 -t vihat/ovpn-agent:0.1.2 .
 
 # The dashboard page (React + HeroUI), embedded into ovpn-dash by go:embed.
 # Static files are the same on every platform, so build them on the build machine's.
@@ -18,7 +18,7 @@ ARG GEOIP_MONTH=2026-11
 RUN wget -qO- "https://download.db-ip.com/free/dbip-country-lite-${GEOIP_MONTH}.mmdb.gz" | gunzip > /dbip-country-lite.mmdb \
  && test -s /dbip-country-lite.mmdb
 
-FROM golang:1.26.3-alpine AS build
+FROM golang:1.26.11-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

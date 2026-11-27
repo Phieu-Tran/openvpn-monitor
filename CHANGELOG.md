@@ -4,6 +4,17 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.2 - 2026-11-27
+
+### Security
+
+- Built with Go 1.26.11 instead of 1.26.3. govulncheck finds 20 known vulnerabilities in the
+  older standard library that the binaries reach (mostly `net/http`, also `net/textproto`,
+  `crypto/tls`, `crypto/x509`), all fixed by 1.26.11: GO-2026-5026, -5037, -5039, -5856,
+  -5972, -6089, -6090, -6218, -6603, -6605, -6607 to -6613, -6617, -6809, -6859.
+  No code change; upgrade both hosts.
+- CI fails on any vulnerability govulncheck finds (that is how these were caught).
+
 ## 0.1.1 - 2026-11-26
 
 ### Added
