@@ -4,7 +4,7 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
-## Unreleased
+## 0.1.3 - 2026-11-27
 
 ### Added
 
