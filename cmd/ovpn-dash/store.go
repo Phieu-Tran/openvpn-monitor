@@ -702,6 +702,57 @@ func (s *store) fillCountries(country func(string) string) error {
 	return tx.Commit()
 }
 
+// agentLogin is one successful login from the agent's connect history (the OpenVPN
+// client-connect hook): proof that this real IP:port authenticated as user.
+type agentLogin struct {
+	T       int64  `json:"t"`
+	Profile string `json:"profile"`
+	Proto   string `json:"proto"`
+	User    string `json:"user"`
+	IP      string `json:"ip"`
+	Port    int    `json:"port"`
+	VPNIP   string `json:"vpn_ip"`
+}
+
+// applyLogins names what was stored as UNDEF (TLS handshake not done when a poll saw it):
+// a session or a probe of the same server and real IP:port that started within two
+// minutes of a login was that user. A probe that was a user becomes a session again.
+// Idempotent: the same login may come twice.
+func (s *store) applyLogins(server string, logins []agentLogin) error {
+	if len(logins) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const near = `server = ?3 AND real_ip = ?4 AND real_port = ?5 AND started BETWEEN ?6 - 120 AND ?6 + 120`
+	var stmts []*sql.Stmt
+	for _, q := range []string{
+		`UPDATE sessions SET cn = ?1, vpn_ip = CASE WHEN vpn_ip = '' THEN ?2 ELSE vpn_ip END WHERE cn = 'UNDEF' AND ` + near,
+		`INSERT OR IGNORE INTO sessions (instance, cid, started, ended, cn, profile, proto, real_ip, real_port, vpn_ip, country,
+			bytes_rx, bytes_tx, peak, open, device, server)
+			SELECT instance, cid, started, ended, ?1, profile, proto, real_ip, real_port, ?2, country, 0, 0, 0, 0, '', server
+			FROM probes WHERE ` + near,
+		`DELETE FROM probes WHERE ?1 IS NOT NULL AND ?2 IS NOT NULL AND ` + near,
+	} {
+		st, err := tx.Prepare(q)
+		if err != nil {
+			return err
+		}
+		stmts = append(stmts, st)
+	}
+	for _, l := range logins {
+		for _, st := range stmts {
+			if _, err := st.Exec(l.User, l.VPNIP, server, l.IP, l.Port, l.T); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 // unauthenticated is the CN OpenVPN shows until a client's TLS handshake is done.
 const unauthenticated = "UNDEF"
 

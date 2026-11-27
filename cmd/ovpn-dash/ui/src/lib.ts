@@ -74,7 +74,7 @@ export interface Heat { cells: { day: number; hour: number; avg: number; max: nu
 export interface Facets { servers: string[]; profiles: string[]; countries: string[]; plats: string[] }
 export interface Status {
   version: string; geoip: string; geoip_ok: boolean; alerts: { rate: number };
-  agents: { name: string; ok: boolean; error?: string; version?: string; flows?: string; flows_dropped?: number }[];
+  agents: { name: string; ok: boolean; error?: string; version?: string; flows?: string; flows_dropped?: number; logins?: string }[];
   store: {
     sessions: number; open: number; samples: number; oldest?: string; write_errors: number;
     retention_days: number; data_bytes: number; max_bytes: number; trimmed?: string;

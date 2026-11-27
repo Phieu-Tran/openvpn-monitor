@@ -31,6 +31,8 @@ func main() {
 	root := flag.String("root", app.Env("OVPN_ROOT", "/srv/ovpn"), "directory holding <profile>/mgmt-<proto>.sock [$OVPN_ROOT]")
 	tokenFile := flag.String("token-file", app.Env("OVPN_TOKEN_FILE", "/data/agent.token"), "file containing the bearer token [$OVPN_TOKEN_FILE]")
 	flowNets := flag.String("flows", app.Env("OVPN_FLOWS", ""), "access log: VPN client subnets, e.g. 10.8.0.0/16; needs cap_add NET_ADMIN; empty = off [$OVPN_FLOWS]")
+	histRoot := flag.String("history", app.Env("OVPN_HISTORY_ROOT", "/srv/ovpn-log"), "connect history: <dir>/<profile>/history-YYYY-MM.log (each profile's data/log, read-only); used when it exists [$OVPN_HISTORY_ROOT]")
+	histTZ := flag.String("history-tz", app.Env("OVPN_HISTORY_TZ", "Asia/Ho_Chi_Minh"), "time zone of the history files (the hook's TZ) [$OVPN_HISTORY_TZ]")
 	interval := flag.Duration("interval", 5*time.Second, "poll interval")
 	timeout := flag.Duration("timeout", 3*time.Second, "per-instance management timeout")
 	dump := flag.String("dump", "", "print the raw 'status 3' output of this socket once and exit")
@@ -42,6 +44,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	loc, err := time.LoadLocation(*histTZ)
+	if err != nil {
+		log.Fatalf("OVPN_HISTORY_TZ: %v", err)
+	}
+	var logins *loginLog // nil = no history mounted
+	if st, err := os.Stat(*histRoot); err == nil && st.IsDir() {
+		logins = newLoginLog(*histRoot, loc)
+	}
 
 	switch {
 	case *showVersion:
@@ -50,7 +60,7 @@ func main() {
 	case *healthcheck:
 		app.Healthcheck(*listen)
 	case *check:
-		selfCheck(*listen, *root, *tokenFile, *timeout, nets)
+		selfCheck(*listen, *root, *tokenFile, *timeout, nets, logins)
 	case *dump != "":
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
@@ -86,7 +96,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           p.handler(token, flows),
+		Handler:           p.handler(token, flows, logins),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -96,7 +106,7 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func (p *poller) handler(token string, flows *flowLog) http.Handler {
+func (p *poller) handler(token string, flows *flowLog, logins *loginLog) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	mux.Handle("GET /api/v1/sessions", auth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -108,6 +118,12 @@ func (p *poller) handler(token string, flows *flowLog) http.Handler {
 		w.Write(p.snap.Load().metrics)
 		io.WriteString(w, flows.metrics())
 		io.WriteString(w, app.RuntimeMetrics())
+	})))
+	// ?since=<unix seconds>: the successful logins from then on, from the connect history.
+	mux.Handle("GET /api/v1/logins", auth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(logins.status(since, time.Now()))
 	})))
 	// ?since=<unix seconds>: the minutes after it that are over (the dash passes the last one it has).
 	mux.Handle("GET /api/v1/flows", auth(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +148,7 @@ func auth(token string, h http.Handler) http.Handler {
 
 // selfCheck verifies what a fresh install needs: token, mounted sockets, each
 // OpenVPN instance answering, and the running agent's API (auth included).
-func selfCheck(listen, root, tokenFile string, timeout time.Duration, nets []netip.Prefix) {
+func selfCheck(listen, root, tokenFile string, timeout time.Duration, nets []netip.Prefix, logins *loginLog) {
 	var c app.Checker
 	fmt.Printf("ovpn-agent %s self-check\n\n", version)
 	var token string
@@ -189,6 +205,9 @@ func selfCheck(listen, root, tokenFile string, timeout time.Duration, nets []net
 		}
 		return fmt.Sprintf("%d/%d instances up", up, len(r.Instances)), nil
 	})
+	if logins != nil {
+		c.Run("connect history under "+logins.root, func() (string, error) { return logins.describe(time.Now()) })
+	}
 	if len(nets) > 0 {
 		c.Run(fmt.Sprintf("access log: conntrack events from %v for 5s", nets), func() (string, error) {
 			fd, err := listenCT()

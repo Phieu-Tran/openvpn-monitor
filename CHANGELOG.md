@@ -4,6 +4,27 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.10 - 2026-11-27
+
+Upgrade the agents too, with the new data/log volumes (see README, "Connect history").
+
+### Added
+
+- Connect history: when OpenVPN has a client-connect hook writing
+  `data/log/history-YYYY-MM.log` (one line per successful login), the agent reads it, read-only,
+  from `/srv/ovpn-log/<profile>` (`OVPN_HISTORY_ROOT`; times in `OVPN_HISTORY_TZ`, default
+  Asia/Ho_Chi_Minh) and serves the logins (`GET /api/v1/logins?since=`). The dash names with
+  them what it saw as UNDEF: a session or a "Not authenticated" entry with the same server and
+  real IP:port, within two minutes of a login, was that user; such an entry goes back to the
+  user's sessions. `-check` reports the profiles and the latest login.
+
+### Fixed
+
+- "Not authenticated" listed users: 0.1.9 moved sessions stored by older versions as UNDEF
+  without a VPN IP there, and some were users caught mid-handshake (e.g. a 21 s login over
+  TCP). With the connect history they go back to their users; the view says where it is not
+  checked. Its "Profile" column is now "Reached": the server (port) connected to, not who.
+
 ## 0.1.9 - 2026-11-27
 
 Dash only: the agents stay on 0.1.8.

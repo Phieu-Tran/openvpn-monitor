@@ -189,7 +189,7 @@ export function App() {
           {view === "online" && <Online live={live.data} error={live.error} alertRate={alertRate} profiles={profiles} server={server} multi={multi} onSession={setSession} />}
           {view === "history" && <Sessions {...props} />}
           {view === "users" && <UserList {...props} />}
-          {view === "probes" && <ProbeLog server={server} multi={multi} profiles={profiles} />}
+          {view === "probes" && <ProbeLog server={server} multi={multi} profiles={profiles} agents={status.data?.agents ?? []} />}
           {view === "access" && <AccessLog server={server} multi={multi} profiles={profiles} agents={status.data?.agents ?? []}
             linked={path === "access" ? linked : null} onUser={openUser} />}
         </main>

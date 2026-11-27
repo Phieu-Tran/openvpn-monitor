@@ -10,7 +10,7 @@ name: ovpn-agent
 
 services:
   agent:
-    image: vihat/ovpn-agent:0.1.9
+    image: vihat/ovpn-agent:0.1.10
     restart: unless-stopped
     network_mode: host
     # uid 0 only to enter data/run (drwx------ root). cap_drop ALL leaves root with
@@ -38,6 +38,13 @@ services:
       # <data/run directory on the host>:/srv/ovpn/<profile name>:ro
       - ${OVPN_RUN_PROFILE_A:?set in .env}:/srv/ovpn/profile-a:ro
       - ${OVPN_RUN_PROFILE_B:?set in .env}:/srv/ovpn/profile-b:ro
+      # Optional, when OpenVPN has a client-connect hook writing data/log/history-YYYY-MM.log:
+      # one per profile, same name as above (never data/ itself: it holds the PKI).
+      # - type: bind
+      #   source: ${OVPN_LOG_PROFILE_A:?set in .env}
+      #   target: /srv/ovpn-log/profile-a
+      #   read_only: true
+      #   bind: { create_host_path: false }
     ulimits:
       nofile: { soft: 1024, hard: 4096 }
     logging:

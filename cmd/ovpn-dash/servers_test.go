@@ -388,3 +388,68 @@ func TestUndef(t *testing.T) {
 		t.Errorf("probes after cid 2 authenticated: %d", n)
 	}
 }
+
+// The connect history names what was stored as UNDEF: a probe that was in fact a user
+// logging in goes back to sessions, an UNDEF session gets its name; the rest stay.
+func TestLoginsNameUndef(t *testing.T) {
+	s := open(t, t.TempDir(), 90*24*time.Hour, 0)
+	t0 := at(0).Unix()
+	ins := func(q string, args ...any) {
+		if _, err := s.db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a user filed as a probe (dash 0.1.9 moving 0.1.8 data), a real scan, an UNDEF session
+	ins("INSERT INTO probes VALUES ('a', 'a/openvpn-tcp-sale-v2', 7, ?, ?, 'sale', 'tcp', '198.51.100.86', 60769, 'VN')", t0, t0+24)
+	ins("INSERT INTO probes VALUES ('a', 'a/openvpn-tcp-sale-v2', 8, ?, ?, 'sale', 'tcp', '192.0.2.66', 40000, 'NL')", t0, t0+10)
+	tx, _ := s.db.Begin()
+	st, _ := tx.Prepare(upsertSQL)
+	upsert(st, record{Server: "a", CN: unauthenticated, Profile: "sale", Proto: "udp", Instance: "a/openvpn-udp-sale-v2", CID: 9,
+		RealIP: "198.51.100.50", RealPort: 5000, Start: at(1), End: at(30)})
+	tx.Commit()
+
+	var asked []string
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/logins":
+			asked = append(asked, r.URL.Query().Get("since"))
+			json.NewEncoder(w).Encode(map[string]any{"enabled": true, "logins": []agentLogin{
+				{T: t0 + 1, Profile: "sale", Proto: "tcp", User: "sale-alice", IP: "198.51.100.86", Port: 60769, VPNIP: "10.8.13.27"},
+				{T: at(1).Unix() + 2, Profile: "sale", Proto: "udp", User: "sale-bob", IP: "198.51.100.50", Port: 5000, VPNIP: "10.8.12.96"},
+				{T: t0, Profile: "sale", Proto: "tcp", User: "other", IP: "192.0.2.66", Port: 40001}, // another port: not the scan
+			}})
+		case "/api/v1/flows":
+			json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+		default:
+			json.NewEncoder(w).Encode(resp(true))
+		}
+	}))
+	defer agent.Close()
+	agents, _ := parseAgents("a=" + agent.URL)
+	p := &poller{servers: agents, client: agent.Client(), store: s, geo: newGeo("", "")}
+	p.poll()
+	p.poll() // again: nothing doubled
+	if len(asked) != 2 || asked[0] != "0" || asked[1] != fmt.Sprint(at(1).Unix()+2) || p.status()[0].Logins != "on" {
+		t.Errorf("since %v, status %+v", asked, p.status())
+	}
+	got := map[string]record{}
+	for _, x := range list(t, s, filter{from: at(-60), to: time.Now().Add(time.Hour), limit: 100}) {
+		got[x.CN] = x
+	}
+	my, bob := got["sale-alice"], got["sale-bob"]
+	if len(got) != 2 || my.VPNIP != "10.8.13.27" || my.RealPort != 60769 || my.Country != "VN" || !my.End.Equal(time.Unix(t0+24, 0).UTC()) ||
+		bob.VPNIP != "10.8.12.96" {
+		t.Errorf("sessions: %+v", got)
+	}
+	var probes []string
+	rows, _ := s.db.Query("SELECT real_ip FROM probes")
+	for rows.Next() {
+		var ip string
+		rows.Scan(&ip)
+		probes = append(probes, ip)
+	}
+	rows.Close()
+	if len(probes) != 1 || probes[0] != "192.0.2.66" {
+		t.Errorf("probes left: %v", probes)
+	}
+}

@@ -199,6 +199,8 @@ type server struct {
 	version      string
 	last         []agentInstance // last good answer: still shown while the agent is unreachable
 	flowsSince   int64           // last access-log minute stored
+	loginsSince  int64           // last connect-history second applied
+	logins       string          // connect history on the agent: "" unknown, "off", "on", or what is wrong
 	flows        string          // access log on the agent: "" unknown, "off", "on", or what is wrong
 	flowsDropped uint64
 }
@@ -268,10 +270,13 @@ func (p *poller) poll() {
 	errs := make([]error, len(p.servers))
 	flows := make([]flowsResp, len(p.servers))
 	flowErrs := make([]error, len(p.servers))
+	logins := make([]loginsResp, len(p.servers))
+	loginErrs := make([]error, len(p.servers))
 	since := make([]int64, len(p.servers))
+	loginSince := make([]int64, len(p.servers))
 	p.mu.Lock()
 	for i, sv := range p.servers {
-		since[i] = sv.flowsSince
+		since[i], loginSince[i] = sv.flowsSince, sv.loginsSince
 	}
 	p.mu.Unlock()
 	var wg sync.WaitGroup
@@ -279,6 +284,7 @@ func (p *poller) poll() {
 		wg.Go(func() {
 			if resps[i], errs[i] = p.fetch(sv); errs[i] == nil {
 				flows[i], flowErrs[i] = p.fetchFlows(sv, since[i])
+				logins[i], loginErrs[i] = p.fetchLogins(sv, loginSince[i])
 			}
 		})
 	}
@@ -340,6 +346,37 @@ func (p *poller) poll() {
 		return
 	}
 	p.store.observe(fresh, now)
+	// The connect history next: it names sessions first seen as UNDEF, before the access log
+	// below looks up users by VPN IP.
+	for i, sv := range p.servers {
+		if errs[i] != nil {
+			continue
+		}
+		state, last := "on", loginSince[i]
+		switch lr := logins[i]; {
+		case loginErrs[i] != nil:
+			state = loginErrs[i].Error()
+		case !lr.Enabled:
+			state = "off"
+		case lr.Error != "":
+			state = lr.Error
+		}
+		if loginErrs[i] == nil {
+			if err := p.store.applyLogins(sv.name, logins[i].Logins); err != nil {
+				p.store.failed(fmt.Errorf("connect history: %w", err))
+			} else {
+				for _, l := range logins[i].Logins {
+					last = max(last, l.T)
+				}
+			}
+		}
+		p.mu.Lock()
+		if state != sv.logins && sv.logins != "" {
+			log.Printf("agent %s: connect history %s", sv.name, state)
+		}
+		sv.logins, sv.loginsSince = state, last
+		p.mu.Unlock()
+	}
 	// The access log, after the sessions: a connection's user is the session that had its VPN IP.
 	for i, sv := range p.servers {
 		if errs[i] != nil {
@@ -372,6 +409,36 @@ func (p *poller) poll() {
 		sv.flows, sv.flowsSince, sv.flowsDropped = state, last, flows[i].Dropped
 		p.mu.Unlock()
 	}
+}
+
+// loginsResp is ovpn-agent /api/v1/logins (agent 0.1.10): the successful logins of its connect history.
+type loginsResp struct {
+	Enabled bool         `json:"enabled"`
+	Error   string       `json:"error"`
+	Logins  []agentLogin `json:"logins"`
+}
+
+// fetchLogins gets the logins from since on; an older agent has none (off).
+func (p *poller) fetchLogins(sv *server, since int64) (loginsResp, error) {
+	var r loginsResp
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/logins?since=%d", sv.base, since), nil)
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return r, fmt.Errorf("connect history: %v", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return r, nil
+	default:
+		return r, errors.New("connect history: agent returned " + resp.Status)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&r); err != nil {
+		return r, fmt.Errorf("connect history: decoding: %v", err)
+	}
+	return r, nil
 }
 
 // flowsResp is ovpn-agent /api/v1/flows.
@@ -415,7 +482,8 @@ type agentStatus struct {
 	Version   string    `json:"version,omitempty"`
 	Polls     uint64    `json:"polls"`
 	PollFails uint64    `json:"poll_fails"`
-	Flows     string    `json:"flows,omitempty"` // access log: off, on, or what is wrong
+	Flows     string    `json:"flows,omitempty"`  // access log: off, on, or what is wrong
+	Logins    string    `json:"logins,omitempty"` // connect history: off, on, or what is wrong
 	FlowsLost uint64    `json:"flows_dropped,omitempty"`
 }
 
@@ -425,7 +493,7 @@ func (p *poller) status() []agentStatus {
 	out := []agentStatus{}
 	for _, sv := range p.servers {
 		out = append(out, agentStatus{Name: sv.name, URL: sv.base, OK: sv.ok, Error: sv.lastErr, LastOK: sv.lastOK,
-			Version: sv.version, Polls: sv.polls, PollFails: sv.fails, Flows: sv.flows, FlowsLost: sv.flowsDropped})
+			Version: sv.version, Polls: sv.polls, PollFails: sv.fails, Flows: sv.flows, FlowsLost: sv.flowsDropped, Logins: sv.logins})
 	}
 	return out
 }

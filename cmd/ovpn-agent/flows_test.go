@@ -128,7 +128,7 @@ func TestFlowLog(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", url, nil)
 		r.Header.Set("Authorization", "Bearer 0123456789abcdef")
-		newPoller(t.TempDir(), time.Second).handler("0123456789abcdef", fl).ServeHTTP(w, r)
+		newPoller(t.TempDir(), time.Second).handler("0123456789abcdef", fl, nil).ServeHTTP(w, r)
 		var st flowStatus
 		if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
 			t.Fatalf("%s: %d %s", url, w.Code, w.Body)
