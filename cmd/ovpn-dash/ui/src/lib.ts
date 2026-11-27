@@ -16,14 +16,16 @@ export interface LiveSession {
   cid: number; peer_id: number; cipher: string; last_ref?: string; country?: string;
 }
 export interface Instance {
-  name: string; profile: string; proto: string; up: boolean; last_error?: string; last_ok?: string;
+  server: string; name: string; profile: string; proto: string; up: boolean; last_error?: string; last_ok?: string;
   version?: string; sessions: LiveSession[];
 }
-export interface Live { generated_at: string; agent_version: string; instances: Instance[] }
-export type LiveRow = LiveSession & { instance: string; profile: string; proto: string };
+// One agent = one OpenVPN host. Its instances stay in the list (last good answer) while it is unreachable.
+export interface LiveServer { name: string; ok: boolean; error?: string; last_ok?: string; agent_version?: string }
+export interface Live { generated_at: string; servers: LiveServer[]; instances: Instance[] }
+export type LiveRow = LiveSession & { server: string; instance: string; profile: string; proto: string };
 
 export interface SessionRecord {
-  cn: string; profile: string; proto: string; instance: string; cid: number; real_ip: string; real_port: number;
+  server: string; cn: string; profile: string; proto: string; instance: string; cid: number; real_ip: string; real_port: number;
   vpn_ip: string; start: string; end: string; bytes_rx: number; bytes_tx: number; peak_rate?: number;
   open?: boolean; country?: string; device?: Device;
 }
@@ -34,7 +36,7 @@ export interface History {
   summary: { total: number; users: number; online_seconds: number; bytes_rx: number; bytes_tx: number; alerts: number };
 }
 export interface UserRow {
-  cn: string; profiles: string[]; sessions: number; online_seconds: number; bytes_rx: number; bytes_tx: number;
+  cn: string; servers: string[]; profiles: string[]; sessions: number; online_seconds: number; bytes_rx: number; bytes_tx: number;
   peak_rate: number; last_seen: string; online: boolean; countries: string[]; ips: number; plats: string[];
 }
 export interface Users { users: UserRow[]; summary: { total: number; online: number; alerts: number } }
@@ -46,13 +48,13 @@ export interface UserDetail {
 }
 export interface Series {
   from: string; to: string; step: number;
-  points: { t: string; online: Record<string, number>; up: number; total: number; rx: number; tx: number }[];
+  points: { t: string; online: Record<string, number>; servers?: Record<string, number>; up: number; total: number; rx: number; tx: number }[];
 }
 export interface Heat { cells: { day: number; hour: number; avg: number; max: number }[] }
-export interface Facets { profiles: string[]; countries: string[]; plats: string[] }
+export interface Facets { servers: string[]; profiles: string[]; countries: string[]; plats: string[] }
 export interface Status {
   version: string; geoip: string; geoip_ok: boolean; alerts: { rate: number };
-  agent: { ok: boolean; error?: string; version?: string };
+  agents: { name: string; ok: boolean; error?: string; version?: string }[];
   store: {
     sessions: number; open: number; samples: number; oldest?: string; write_errors: number;
     retention_days: number; data_bytes: number; max_bytes: number; trimmed?: string;

@@ -10,6 +10,8 @@ cmd/ovpn-dash/web/*
 # hosts) but never go to git; git has docker-compose.example.yml and .env.example
 deploy/agent/docker-compose.yml
 deploy/dash/docker-compose.yml
+# one folder per extra OpenVPN host (deploy/agent-<host>/)
+deploy/agent-*/
 deploy/*/.env
 # internal notes
 ovpn-dash-prompt.md

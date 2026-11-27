@@ -1,16 +1,16 @@
 import { Card, Skeleton, Tooltip } from "@heroui/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Heatmap, Legend, Sparkline, TimeChart, seriesColor } from "./charts";
 import { F, M, H, PRESETS, appName, bytes, countryName, duration, osName, rangeKey, rangeParams, rate, relative, sum, useJSON, usePref, addr } from "./lib";
 import type { Heat, Live, LiveRow, Preset, Series } from "./lib";
-import { Badge, ColumnMenu, CountryTag, DataTable, DeviceTag, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
+import { Badge, ColumnMenu, CountryTag, DataTable, DeviceTag, ICONS, Icon, Panel, ProfileTabs, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
 const CHART_PRESETS: Preset[] = ["5m", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d", "30d", "90d"];
 
 const sortKeys: Record<string, (s: LiveRow) => number | string> = {
-  cn: (s) => s.cn, profile: (s) => s.profile, proto: (s) => s.proto, vpn: (s) => s.vpn_ip,
+  cn: (s) => s.cn, server: (s) => s.server, profile: (s) => s.profile, proto: (s) => s.proto, vpn: (s) => s.vpn_ip,
   real: (s) => (s.country ?? "") + s.real_ip, since: (s) => Date.parse(s.connected_since),
   dur: (s) => -Date.parse(s.connected_since), traffic: (s) => s.bytes_rx + s.bytes_tx, rate: (s) => s.rate_rx + s.rate_tx,
   seen: (s) => (s.last_ref ? Date.parse(s.last_ref) : 0), cipher: (s) => s.cipher,
@@ -35,29 +35,37 @@ function Kpi({ label, icon, value, sub, tone = "accent", children }: {
   );
 }
 
-export function Online({ live, error, alertRate, profiles, onSession }: {
-  live?: Live; error: string; alertRate: number; profiles: string[]; onSession: (s: LiveRow) => void;
+export function Online({ live, error, alertRate, profiles, server, multi, onSession }: {
+  live?: Live; error: string; alertRate: number; profiles: string[]; server: string; multi: boolean; onSession: (s: LiveRow) => void;
 }) {
   const [saved, setRange] = usePref<Preset>("range", "24h");
   const range: Preset = CHART_PRESETS.includes(saved) ? saved : "24h";
   const [heatDays, setHeatDays] = usePref<"7d" | "30d" | "90d">("heat", "30d");
   // short ranges move fast: refresh the charts more often for them
-  const series = useJSON<Series>(`series-${range}`, () => `api/series?${rangeParams({ preset: range })}`, PRESETS[range] <= H ? 5000 : 60000);
-  const heat = useJSON<Heat>(`heat-${heatDays}`, () => `api/heatmap?${rangeParams({ preset: heatDays })}`, 10 * M);
+  const only = server ? "&server=" + encodeURIComponent(server) : "";
+  const series = useJSON<Series>(`series-${range}-${server}`, () => `api/series?${rangeParams({ preset: range })}${only}`, PRESETS[range] <= H ? 5000 : 60000);
+  const heat = useJSON<Heat>(`heat-${heatDays}-${server}`, () => `api/heatmap?${rangeParams({ preset: heatDays })}${only}`, 10 * M);
 
   const [q, setQ] = useState("");
   const [profile, setProfile] = useState("");
   const [onlyAlerts, setOnlyAlerts] = useState(false);
+  useEffect(() => setProfile(""), [server]); // the profile may not exist on the other server
   const [sort, setSort] = usePref<Sort>("sort.online", { k: "profile", dir: 1 });
   const [hidden, setHidden] = usePref<string[]>("hidden.online", ["since", "cipher"]);
 
-  const insts = live?.instances ?? [];
-  const all: LiveRow[] = insts.flatMap((i) => i.sessions.map((s) => ({ ...s, instance: i.name, proto: i.proto, profile: i.profile })));
+  // a server keeps its colour: its position in the agent list
+  const serverNames = live?.servers.map((s) => s.name) ?? [];
+  const groups = (live?.servers ?? []).filter((s) => !server || s.name === server);
+  const insts = (live?.instances ?? []).filter((i) => !server || i.server === server);
+  const stale = (i: { server: string }) => live?.servers.some((s) => s.name === i.server && !s.ok);
+  const all: LiveRow[] = insts.flatMap((i) => i.sessions.map((s) => ({ ...s, server: i.server, instance: i.name, proto: i.proto, profile: i.profile })));
   const alerting = (s: LiveRow) => alertRate > 0 && s.rate_rx + s.rate_tx > alertRate;
   // Each profile has its own PKI: the same CN twice inside one profile looks like a shared certificate.
   const perCN = new Map<string, number>();
-  for (const s of all) perCN.set(`${s.profile}\n${s.cn}`, (perCN.get(`${s.profile}\n${s.cn}`) ?? 0) + 1);
-  const copies = (s: LiveRow) => perCN.get(`${s.profile}\n${s.cn}`) ?? 1;
+  const cnKey = (s: LiveRow) => `${s.server}\n${s.profile}\n${s.cn}`;
+  for (const s of all) perCN.set(cnKey(s), (perCN.get(cnKey(s)) ?? 0) + 1);
+  const copies = (s: LiveRow) => perCN.get(cnKey(s)) ?? 1;
+  const instName = (i: { server: string; name: string }) => (multi ? `${i.server}/${i.name}` : i.name);
   const down = insts.filter((i) => !i.up);
   const nAlerts = all.filter(alerting).length;
 
@@ -67,27 +75,33 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
   const to = series.data ? Date.parse(series.data.to) : Date.now();
   const step = (series.data?.step ?? 60) * 1000;
   const peak = points.reduce<(typeof points)[number] | undefined>((a, p) => (!a || p.n > a.n ? p : a), undefined);
-  const chartProfiles = profiles.filter((p) => points.some((x) => x.online[p]));
+  // all servers: one band per server; one server: one band per profile
+  const byServer = multi && !server;
+  type P = (typeof points)[number];
+  const bands = byServer
+    ? serverNames.filter((n) => points.some((x) => x.servers?.[n])).map((n) => ({ name: n, color: seriesColor(serverNames.indexOf(n)), v: (x: P) => x.servers?.[n] ?? 0 }))
+    : profiles.filter((p) => points.some((x) => x.online[p])).map((p) => ({ name: p, color: seriesColor(profiles.indexOf(p)), v: (x: P) => x.online[p] ?? 0 }));
   const empty = series.error || (series.loading ? "Loading…" : "No data yet — one sample is recorded per minute");
 
   const needle = q.trim().toLowerCase();
   const cmpKey = sortKeys[sort.k] ?? sortKeys.cn;
   const rows = all
     .filter((s) => (!profile || s.profile === profile) && (!onlyAlerts || alerting(s)) && (!needle ||
-      [s.cn, s.vpn_ip, s.vpn_ip6, s.real_ip, s.profile, s.country, s.country && countryName(s.country), s.device?.plat && osName(s.device), appName(s.device)].some((v) => v?.toLowerCase().includes(needle))))
+      [s.cn, s.vpn_ip, s.vpn_ip6, s.real_ip, s.server, s.profile, s.country, s.country && countryName(s.country), s.device?.plat && osName(s.device), appName(s.device)].some((v) => v?.toLowerCase().includes(needle))))
     .sort((a, b) => {
       const x = cmpKey(a), y = cmpKey(b);
       const r = typeof x === "number" ? x - (y as number) : String(x).localeCompare(String(y), undefined, { numeric: true });
-      return r * sort.dir || a.profile.localeCompare(b.profile) || a.cn.localeCompare(b.cn);
+      return r * sort.dir || a.server.localeCompare(b.server) || a.profile.localeCompare(b.profile) || a.cn.localeCompare(b.cn);
     });
 
   const cols: Col<LiveRow>[] = [
     { id: "cn", label: "CN", cell: (s) => (
       <span className="flex items-center gap-1.5">
         <span className="font-semibold">{s.cn}</span>
-        {copies(s) > 1 && <Badge tone="warning" title={`${s.cn} is online ${copies(s)} times in ${s.profile}: possible shared certificate`}>×{copies(s)}</Badge>}
+        {copies(s) > 1 && <Badge tone="warning" title={`${s.cn} is online ${copies(s)} times in ${multi ? s.server + "/" : ""}${s.profile}: possible shared certificate`}>×{copies(s)}</Badge>}
         {alerting(s) && <Badge tone="danger" title={`rate ${rate(s.rate_rx + s.rate_tx)} > ${rate(alertRate)}`}>⚠ rate</Badge>}
       </span>) },
+    ...(multi ? [{ id: "server", label: "Server", cell: (s: LiveRow) => <ServerTag name={s.server} /> }] : []),
     { id: "profile", label: "Profile", cell: (s) => <ProfileTag name={s.profile} profiles={profiles} /> },
     { id: "proto", label: "Proto", cell: (s) => s.proto.toUpperCase() },
     { id: "vpn", label: "VPN IP", cell: (s) => <span className="mono">{s.vpn_ip}{s.vpn_ip6 && <span className="block text-xs text-muted">{s.vpn_ip6}</span>}</span> },
@@ -112,7 +126,7 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
           <Sparkline values={points.map((p) => p.n)} />
         </Kpi>
         <Kpi label="Instances up" icon="server" tone={down.length ? "danger" : "success"} value={live ? `${insts.length - down.length} / ${insts.length}` : undefined}
-          sub={live && (down.length ? <span className="text-danger" title={down.map((i) => i.name).join("\n")}>down: {down.map((i) => i.name).join(", ")}</span> : "all up")} />
+          sub={live && (down.length ? <span className="text-danger" title={down.map(instName).join("\n")}>down: {down.map(instName).join(", ")}</span> : "all up")} />
         <Kpi label="Throughput now" icon="speed" value={live ? rate(sum(all, (s) => s.rate_rx + s.rate_tx)) : undefined}
           sub={live && `↑ ${rate(sum(all, (s) => s.rate_rx))} · ↓ ${rate(sum(all, (s) => s.rate_tx))}`}>
           <Sparkline values={points.map((p) => p.rx + p.tx)} />
@@ -122,47 +136,62 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
           sub={alertRate ? `sessions above ${rate(alertRate)}` : "alerts off"} />
       </div>
 
-      <div className={`grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3 ${error ? "stale" : ""}`}>
-        {profiles.filter((p) => insts.some((i) => i.profile === p)).map((p) => (
-          <Card key={p} className="gap-2 py-3">
-            <div className="flex items-center gap-2">
-              <i className="size-2.5 shrink-0 rounded-full" style={{ background: seriesColor(profiles.indexOf(p)) }} />
-              <span className="mr-auto truncate text-sm font-semibold" title={p}>{p}</span>
-              <span className="num text-xs whitespace-nowrap text-muted">{sum(insts.filter((i) => i.profile === p), (i) => i.sessions.length)} online</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-            {insts.filter((i) => i.profile === p).map((i) => (
-              <Tooltip key={i.name} delay={150}>
-                <Tooltip.Trigger>
-                  <span tabIndex={0} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${i.up ? "bg-default" : "bg-danger-soft text-danger"}`}>
-                    <i className={`inline-block size-1.5 rounded-full ${i.up ? "bg-success" : "bg-danger"}`} />
-                    {i.proto.toUpperCase()} <b className="num">{i.up ? i.sessions.length : "down"}</b>
-                  </span>
-                </Tooltip.Trigger>
-                <Tooltip.Content>
-                  <div className="text-xs">
-                    <b>{i.name}</b>
-                    <div>{i.up ? `OpenVPN ${i.version ?? "?"}` : `DOWN: ${i.last_error}`}</div>
-                    {i.last_ok && <div>last {i.up ? "poll" : "OK"} {F.abs.format(Date.parse(i.last_ok))}</div>}
+      {groups.map((g) => {
+        const gi = insts.filter((i) => i.server === g.name);
+        const gs = all.filter((s) => s.server === g.name);
+        return (
+          <section key={g.name} aria-label={`Server ${g.name}`} className={`grid gap-2 ${error || !g.ok ? "stale" : ""}`}>
+            {multi && (
+              <h2 className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                <span className="flex items-center gap-2 font-semibold"><i className={`size-2 rounded-full ${g.ok ? "bg-success" : "bg-danger"}`} /><Icon name="server" className="size-4 text-muted" />{g.name}</span>
+                <span className="num text-muted">{gs.length} online · {gi.filter((i) => i.up).length}/{gi.length} instances up · {rate(sum(gs, (s) => s.rate_rx + s.rate_tx))}</span>
+                <span className="text-xs text-muted">{g.ok ? `agent ${g.agent_version ?? "?"}` : <span className="text-danger">agent not answering: {g.error}</span>}</span>
+              </h2>
+            )}
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
+              {profiles.filter((p) => gi.some((i) => i.profile === p)).map((p) => (
+                <Card key={p} className="gap-2 py-3">
+                  <div className="flex items-center gap-2">
+                    <i className="size-2.5 shrink-0 rounded-full" style={{ background: seriesColor(profiles.indexOf(p)) }} />
+                    <span className="mr-auto truncate text-sm font-semibold" title={p}>{p}</span>
+                    <span className="num text-xs whitespace-nowrap text-muted">{sum(gi.filter((i) => i.profile === p), (i) => i.sessions.length)} online</span>
                   </div>
-                </Tooltip.Content>
-              </Tooltip>
-            ))}
+                  <div className="flex flex-wrap gap-1.5">
+                  {gi.filter((i) => i.profile === p).map((i) => (
+                    <Tooltip key={i.name} delay={150}>
+                      <Tooltip.Trigger>
+                        <span tabIndex={0} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${i.up ? "bg-default" : "bg-danger-soft text-danger"}`}>
+                          <i className={`inline-block size-1.5 rounded-full ${i.up ? "bg-success" : "bg-danger"}`} />
+                          {i.proto.toUpperCase()} <b className="num">{i.up ? i.sessions.length : "down"}</b>
+                        </span>
+                      </Tooltip.Trigger>
+                      <Tooltip.Content>
+                        <div className="text-xs">
+                          <b>{instName(i)}</b>
+                          <div>{i.up ? `OpenVPN ${i.version ?? "?"}` : `DOWN: ${i.last_error}`}</div>
+                          {i.last_ok && <div>last {i.up ? "poll" : "OK"} {F.abs.format(Date.parse(i.last_ok))}</div>}
+                        </div>
+                      </Tooltip.Content>
+                    </Tooltip>
+                  ))}
+                  </div>
+                </Card>
+              ))}
             </div>
-          </Card>
-        ))}
-      </div>
+          </section>
+        );
+      })}
 
       <Panel title="Activity" actions={<Segmented label="Chart range" value={range} options={CHART_PRESETS} onChange={(v) => setRange(v as Preset)} />}>
         <div className="grid gap-6 xl:grid-cols-2">
           <figure className="min-w-0">
             <figcaption className="mb-2 flex flex-wrap items-center gap-x-4 text-sm text-muted">
-              Online sessions by profile
-              <Legend items={chartProfiles.map((p) => ({ name: p, color: seriesColor(profiles.indexOf(p)), value: String(points.at(-1)?.online[p] ?? 0) }))} />
+              Online sessions by {byServer ? "server" : "profile"}
+              <Legend items={bands.map((b) => ({ name: b.name, color: b.color, value: String(points.length ? b.v(points.at(-1)!) : 0) }))} />
             </figcaption>
-            <TimeChart key={rangeKey({ preset: range })} label="Online sessions" stacked integer floor={4} from={from} to={to} step={step} empty={empty}
-              points={chartProfiles.length ? points.map((p) => ({ t: p.t, v: chartProfiles.map((n) => p.online[n] ?? 0) })) : points.map((p) => ({ t: p.t, v: [0] }))}
-              series={chartProfiles.length ? chartProfiles.map((p) => ({ name: p, color: seriesColor(profiles.indexOf(p)) })) : [{ name: "Online", color: "var(--s1)" }]}
+            <TimeChart key={rangeKey({ preset: range }) + server} label="Online sessions" stacked integer floor={4} from={from} to={to} step={step} empty={empty}
+              points={bands.length ? points.map((p) => ({ t: p.t, v: bands.map((b) => b.v(p)) })) : points.map((p) => ({ t: p.t, v: [0] }))}
+              series={bands.length ? bands.map((b) => ({ name: b.name, color: b.color })) : [{ name: "Online", color: "var(--s1)" }]}
               fmt={(v) => String(Math.round(v))} />
           </figure>
           <figure className="min-w-0">
@@ -180,7 +209,7 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
 
       <Panel title="Sessions" flush actions={<>
         <Toggle label="Alerts only" value={onlyAlerts} onChange={setOnlyAlerts} />
-        <Search value={q} onChange={setQ} placeholder="CN, IP, country, profile or device" />
+        <Search value={q} onChange={setQ} placeholder={multi ? "CN, IP, country, server, profile or device" : "CN, IP, country, profile or device"} />
         <ColumnMenu cols={cols} hidden={hidden} onChange={setHidden} />
       </>}>
         <div className="px-4 pb-3">
@@ -189,9 +218,9 @@ export function Online({ live, error, alertRate, profiles, onSession }: {
         </div>
         <DataTable label="Online sessions" cols={cols.filter((c) => !hidden.includes(c.id))} rows={rows} stale={!!error}
           accent={(s) => profileColor(profiles, s.profile)}
-          rowId={(s) => `${s.instance}|${s.cid}|${s.connected_since}`} sort={sort} onSort={setSort}
+          rowId={(s) => `${s.server}|${s.instance}|${s.cid}|${s.connected_since}`} sort={sort} onSort={setSort}
           descFirst={["dur", "traffic", "rate", "seen", "since"]}
-          rowClass={(s) => (alerting(s) ? "row-alert" : copies(s) > 1 ? "row-warn" : "")} onRow={onSession}
+          rowClass={(s) => `${alerting(s) ? "row-alert" : copies(s) > 1 ? "row-warn" : ""}${stale(s) ? " stale" : ""}`} onRow={onSession}
           empty={!live ? (error ? "No data" : "Loading…") : q || profile || onlyAlerts ? "No session matches the filter" : "Nobody is online"} />
       </Panel>
 

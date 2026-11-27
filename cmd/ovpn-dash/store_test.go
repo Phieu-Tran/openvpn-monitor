@@ -22,7 +22,7 @@ var base = time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
 func at(m int) time.Time { return base.Add(time.Duration(m) * time.Minute) }
 
 func resp(up bool, cids ...uint64) agentResp {
-	in := agentInstance{Name: "openvpn-udp-all-dev-v2", Profile: "all-dev", Proto: "udp", Up: up}
+	in := agentInstance{Server: "a", Name: "openvpn-udp-all-dev-v2", Profile: "all-dev", Proto: "udp", Up: up}
 	for _, c := range cids {
 		in.Sessions = append(in.Sessions, agentSession{Client: mgmt.Client{
 			CN: fmt.Sprintf("u%d", c), CID: c, RealIP: fmt.Sprintf("203.0.113.%d", c), VPNIP: "10.8.0.2",
@@ -33,7 +33,7 @@ func resp(up bool, cids ...uint64) agentResp {
 
 func open(t *testing.T, dir string, retention time.Duration, max int64) *store {
 	t.Helper()
-	s, err := openStore(dir, retention, max, func(string) string { return "" })
+	s, err := openStore(dir, "a", retention, max, func(string) string { return "" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,14 +157,14 @@ func TestStoreTracksSessions(t *testing.T) {
 	}
 
 	// Series: one sample per minute; downsampling keeps the peak.
-	_, pts, err := s.series(ctx, at(-1), at(10), 360)
+	_, pts, err := s.series(ctx, at(-1), at(10), "", 360)
 	if err != nil || len(pts) != 4 || pts[0].Online["all-dev"] != 2 || pts[2].Up != 0 {
 		t.Fatalf("series: %+v %v", pts, err)
 	}
-	if step, pts, _ := s.series(ctx, at(-1), at(10), 2); step != 5*time.Minute || pts[0].Online["all-dev"] != 2 {
+	if step, pts, _ := s.series(ctx, at(-1), at(10), "a", 2); step != 5*time.Minute || pts[0].Online["all-dev"] != 2 {
 		t.Fatalf("downsampled: step=%v %+v", step, pts)
 	}
-	cells, err := s.heatmap(ctx, at(-1), at(10))
+	cells, err := s.heatmap(ctx, at(-1), at(10), "")
 	vn := at(0).In(vnZone)
 	if err != nil || len(cells) != 1 || cells[0].Hour != vn.Hour() || cells[0].Day != int(vn.Weekday()) || cells[0].Max != 2 {
 		t.Fatalf("heatmap: %+v %v", cells, err)
@@ -220,7 +220,7 @@ func TestImportJSONL(t *testing.T) {
 	write("open.json", line(map[string]record{"k": r2}))
 	write("samples.jsonl", line(point{T: at(1), Online: map[string]int{"sale": 2}, Up: 1, Total: 1}))
 
-	s, err := openStore(dir, 90*24*time.Hour, 0, func(string) string { return "LAN" })
+	s, err := openStore(dir, "a", 90*24*time.Hour, 0, func(string) string { return "LAN" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestStoreDevice(t *testing.T) {
 
 	// The stored device of an open session survives an agent restart.
 	known, err := s.knownDevices()
-	if err != nil || known[sessionKey("openvpn-udp-all-dev-v2", 1, at(0).Add(time.Second).Unix())] != win || len(known) != 1 {
+	if err != nil || known[sessionKey("a/openvpn-udp-all-dev-v2", 1, at(0).Add(time.Second).Unix())] != win || len(known) != 1 {
 		t.Fatalf("known devices: %+v %v", known, err)
 	}
 

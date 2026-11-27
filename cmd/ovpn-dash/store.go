@@ -29,6 +29,7 @@ type agentResp struct {
 }
 
 type agentInstance struct {
+	Server    string         `json:"server,omitempty"` // added by the dash: which agent
 	Name      string         `json:"name"`
 	Profile   string         `json:"profile"`
 	Proto     string         `json:"proto"`
@@ -49,10 +50,11 @@ type agentSession struct {
 // record is one VPN session. End is the last poll that saw it, so a closed
 // session's end is accurate to one poll interval.
 type record struct {
+	Server   string      `json:"server"`
 	CN       string      `json:"cn"`
 	Profile  string      `json:"profile"`
 	Proto    string      `json:"proto"`
-	Instance string      `json:"instance"`
+	Instance string      `json:"instance"` // <server>/<OpenVPN instance>; plain in old JSONL files
 	CID      uint64      `json:"cid"`
 	RealIP   string      `json:"real_ip"`
 	RealPort int         `json:"real_port"`
@@ -67,14 +69,17 @@ type record struct {
 	Device   mgmt.Device `json:"device,omitzero"`
 }
 
-// point is one sample for the charts.
+// point is one sample for the charts: of one server when written, of the
+// selected servers summed when read.
 type point struct {
-	T      time.Time      `json:"t"`
-	Online map[string]int `json:"online"` // sessions per profile
-	Up     int            `json:"up"`
-	Total  int            `json:"total"` // instances known
-	Rx     float64        `json:"rx"`    // bytes/s from clients
-	Tx     float64        `json:"tx"`    // bytes/s to clients
+	Server  string         `json:"server,omitempty"` // written only
+	T       time.Time      `json:"t"`
+	Online  map[string]int `json:"online"`            // sessions per profile
+	Servers map[string]int `json:"servers,omitempty"` // sessions per server, read only
+	Up      int            `json:"up"`
+	Total   int            `json:"total"` // instances known
+	Rx      float64        `json:"rx"`    // bytes/s from clients
+	Tx      float64        `json:"tx"`    // bytes/s to clients
 }
 
 const (
@@ -105,22 +110,30 @@ CREATE TABLE IF NOT EXISTS sessions (
   peak      REAL    NOT NULL,
   open      INTEGER NOT NULL,
   device    TEXT    NOT NULL DEFAULT '', -- JSON mgmt.Device, '' = unknown
+  server    TEXT    NOT NULL DEFAULT '', -- the agent's name; instance is <server>/<name>
   UNIQUE (instance, cid, started)
 );
 CREATE INDEX IF NOT EXISTS sessions_started ON sessions (started);
 CREATE INDEX IF NOT EXISTS sessions_ended   ON sessions (ended);
 CREATE INDEX IF NOT EXISTS sessions_cn      ON sessions (cn, started);
 CREATE INDEX IF NOT EXISTS sessions_open    ON sessions (instance) WHERE open = 1;
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+` + samplesSchema
+
+// samplesSchema: one row per server and minute; the servers of one poll share t.
+const samplesSchema = `
 CREATE TABLE IF NOT EXISTS samples (
-  t      INTEGER PRIMARY KEY, -- unix seconds
-  n      INTEGER NOT NULL,    -- sessions online, all profiles
+  server TEXT    NOT NULL,
+  t      INTEGER NOT NULL, -- unix seconds
+  n      INTEGER NOT NULL, -- sessions online, all profiles
   up     INTEGER NOT NULL,
   total  INTEGER NOT NULL,
   rx     REAL    NOT NULL,
   tx     REAL    NOT NULL,
-  online TEXT    NOT NULL     -- JSON {profile: sessions}
+  online TEXT    NOT NULL, -- JSON {profile: sessions}
+  PRIMARY KEY (server, t)
 );
-CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS samples_t ON samples (t);
 `
 
 // store keeps the session history in one SQLite file, <dir>/ovpn-dash.db.
@@ -159,8 +172,9 @@ func openDB(path string) (*sql.DB, error) {
 }
 
 // openStore opens (or creates) the database and imports the JSONL files of
-// earlier versions. country fills the country column of imported sessions.
-func openStore(dir string, retention time.Duration, maxBytes int64, country func(string) string) (*store, error) {
+// earlier versions. country fills the country column of imported sessions; server
+// names the agent of history written before ovpn-dash had several (0.1.4 and older).
+func openStore(dir, server string, retention time.Duration, maxBytes int64, country func(string) string) (*store, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
@@ -196,7 +210,19 @@ func openStore(dir string, retention time.Duration, maxBytes int64, country func
 		db.Close()
 		return nil, err
 	}
-	if err := s.importJSONL(country); err != nil {
+	var hasServer bool
+	if err := db.QueryRow("SELECT count(*) FROM pragma_table_info('sessions') WHERE name = 'server'").Scan(&hasServer); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if !hasServer {
+		if err := addServers(db, server); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("adding servers to the history: %w", err)
+		}
+		log.Printf("history so far assigned to server %q", server)
+	}
+	if err := s.importJSONL(server, country); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("importing the old history files: %w", err)
 	}
@@ -214,9 +240,37 @@ func openStore(dir string, retention time.Duration, maxBytes int64, country func
 	return s, nil
 }
 
+// addServers turns a database of ovpn-dash 0.1.4 or older (one agent) into one of
+// several: every session and sample becomes the given server's. One transaction.
+func addServers(db *sql.DB, server string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{"ALTER TABLE sessions ADD COLUMN server TEXT NOT NULL DEFAULT ''", nil},
+		{"UPDATE sessions SET server = ?, instance = ? || '/' || instance", []any{server, server}},
+		// the schema just put samples_t on the old table: it would go with it
+		{"DROP INDEX IF EXISTS samples_t", nil},
+		{"ALTER TABLE samples RENAME TO samples_old", nil},
+		{samplesSchema, nil},
+		{"INSERT INTO samples (server, t, n, up, total, rx, tx, online) SELECT ?, t, n, up, total, rx, tx, online FROM samples_old", []any{server}},
+		{"DROP TABLE samples_old", nil},
+	} {
+		if _, err := tx.Exec(q.sql, q.args...); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 const upsertSQL = `INSERT INTO sessions
- (instance, cid, started, ended, cn, profile, proto, real_ip, real_port, vpn_ip, country, bytes_rx, bytes_tx, peak, open, device)
- VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ (instance, cid, started, ended, cn, profile, proto, real_ip, real_port, vpn_ip, country, bytes_rx, bytes_tx, peak, open, device, server)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
  ON CONFLICT (instance, cid, started) DO UPDATE SET ended = excluded.ended, bytes_rx = excluded.bytes_rx,
    bytes_tx = excluded.bytes_tx, peak = max(peak, excluded.peak), open = excluded.open,
    country = CASE WHEN country = '' THEN excluded.country ELSE country END,
@@ -229,7 +283,7 @@ func upsert(st *sql.Stmt, r record) error {
 		dev = string(b)
 	}
 	_, err := st.Exec(r.Instance, int64(r.CID), r.Start.Unix(), r.End.Unix(), r.CN, r.Profile, r.Proto,
-		r.RealIP, r.RealPort, r.VPNIP, r.Country, int64(r.BytesRx), int64(r.BytesTx), r.Peak, r.Open, dev)
+		r.RealIP, r.RealPort, r.VPNIP, r.Country, int64(r.BytesRx), int64(r.BytesTx), r.Peak, r.Open, dev, r.Server)
 	return err
 }
 
@@ -242,8 +296,8 @@ func insertSample(tx *sql.Tx, p point) error {
 	for _, v := range p.Online {
 		n += v
 	}
-	_, err = tx.Exec("INSERT OR REPLACE INTO samples (t, n, up, total, rx, tx, online) VALUES (?,?,?,?,?,?,?)",
-		p.T.Unix(), n, p.Up, p.Total, p.Rx, p.Tx, string(online))
+	_, err = tx.Exec("INSERT OR REPLACE INTO samples (server, t, n, up, total, rx, tx, online) VALUES (?,?,?,?,?,?,?,?)",
+		p.Server, p.T.Unix(), n, p.Up, p.Total, p.Rx, p.Tx, string(online))
 	return err
 }
 
@@ -274,7 +328,7 @@ func eachLine[T any](path string, f func(T) error) error {
 // importJSONL moves the history of ovpn-dash 1.0 (history.jsonl, samples.jsonl,
 // open.json) into the database and renames the files to *.imported. All in one
 // transaction: an interrupted import simply runs again.
-func (s *store) importJSONL(country func(string) string) error {
+func (s *store) importJSONL(server string, country func(string) string) error {
 	var found []string
 	for _, name := range []string{"history.jsonl", "open.json", "samples.jsonl"} {
 		if _, err := os.Stat(s.path(name)); err == nil {
@@ -295,7 +349,7 @@ func (s *store) importJSONL(country func(string) string) error {
 	}
 	sessions, samples := 0, 0
 	add := func(r record, open bool) error {
-		r.Open, r.Country = open, country(r.RealIP)
+		r.Open, r.Country, r.Server, r.Instance = open, country(r.RealIP), server, server+"/"+r.Instance
 		sessions++
 		return upsert(st, r)
 	}
@@ -313,7 +367,7 @@ func (s *store) importJSONL(country func(string) string) error {
 			}
 		}
 	}
-	if err := eachLine(s.path("samples.jsonl"), func(p point) error { samples++; return insertSample(tx, p) }); err != nil {
+	if err := eachLine(s.path("samples.jsonl"), func(p point) error { samples++; p.Server = server; return insertSample(tx, p) }); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -361,31 +415,16 @@ func (s *store) write(r agentResp, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	for _, in := range r.Instances {
-		if !in.Up {
-			continue
-		}
-		for _, c := range in.Sessions {
-			err := upsert(st, record{CN: c.CN, Profile: in.Profile, Proto: in.Proto, Instance: in.Name, CID: c.CID,
-				RealIP: c.RealIP, RealPort: c.RealPort, VPNIP: c.VPNIP, Start: c.ConnectedSince, End: now,
-				BytesRx: c.BytesRx, BytesTx: c.BytesTx, Peak: c.RateRx + c.RateTx, Open: true, Country: c.Country, Device: c.Device})
-			if err != nil {
-				return err
-			}
-		}
-		// Everything of this instance that this poll did not touch has ended.
-		// INDEXED BY: only the few open rows, never a walk over the instance's history.
-		if _, err := tx.Exec("UPDATE sessions INDEXED BY sessions_open SET open = 0 WHERE open = 1 AND instance = ? AND ended <> ?", in.Name, now.Unix()); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec("UPDATE sessions INDEXED BY sessions_open SET open = 0 WHERE open = 1 AND ended < ?", now.Add(-staleOpen).Unix()); err != nil {
-		return err
-	}
 	sample := now.Sub(s.lastPoint) >= sampleEvery
-	if sample {
-		p := point{T: now, Online: map[string]int{}, Total: len(r.Instances)}
-		for _, in := range r.Instances {
+	samples := map[string]*point{} // per server
+	for _, in := range r.Instances {
+		if sample {
+			p := samples[in.Server]
+			if p == nil {
+				p = &point{Server: in.Server, T: now, Online: map[string]int{}}
+				samples[in.Server] = p
+			}
+			p.Total++
 			if in.Up {
 				p.Up++
 			}
@@ -395,7 +434,29 @@ func (s *store) write(r agentResp, now time.Time) error {
 				p.Tx += c.RateTx
 			}
 		}
-		if err := insertSample(tx, p); err != nil {
+		if !in.Up {
+			continue
+		}
+		inst := in.Server + "/" + in.Name
+		for _, c := range in.Sessions {
+			err := upsert(st, record{Server: in.Server, CN: c.CN, Profile: in.Profile, Proto: in.Proto, Instance: inst, CID: c.CID,
+				RealIP: c.RealIP, RealPort: c.RealPort, VPNIP: c.VPNIP, Start: c.ConnectedSince, End: now,
+				BytesRx: c.BytesRx, BytesTx: c.BytesTx, Peak: c.RateRx + c.RateTx, Open: true, Country: c.Country, Device: c.Device})
+			if err != nil {
+				return err
+			}
+		}
+		// Everything of this instance that this poll did not touch has ended.
+		// INDEXED BY: only the few open rows, never a walk over the instance's history.
+		if _, err := tx.Exec("UPDATE sessions INDEXED BY sessions_open SET open = 0 WHERE open = 1 AND instance = ? AND ended <> ?", inst, now.Unix()); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("UPDATE sessions INDEXED BY sessions_open SET open = 0 WHERE open = 1 AND ended < ?", now.Add(-staleOpen).Unix()); err != nil {
+		return err
+	}
+	for _, p := range samples {
+		if err := insertSample(tx, *p); err != nil {
 			return err
 		}
 	}
@@ -490,7 +551,7 @@ func (s *store) doPrune(now time.Time) error {
 	return err
 }
 
-// compact merges samples older than cut into one per compactStep: the row with
+// compact merges each server's samples older than cut into one per compactStep: the row with
 // the most sessions (peaks survive; SQLite takes the bare columns from the max
 // row), rates averaged. Idempotent.
 func (s *store) compact(cut int64) error {
@@ -501,10 +562,10 @@ func (s *store) compact(cut int64) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.Exec(fmt.Sprintf(`
-		CREATE TEMP TABLE merged AS SELECT t / %[1]d * %[1]d AS t, max(n) AS n, up, total, avg(rx) AS rx, avg(tx) AS tx, online
-			FROM samples WHERE t < %[2]d GROUP BY t / %[1]d HAVING count(*) > 1 OR min(t) %% %[1]d <> 0;
-		DELETE FROM samples WHERE t < %[2]d AND t / %[1]d * %[1]d IN (SELECT t FROM merged);
-		INSERT INTO samples (t, n, up, total, rx, tx, online) SELECT t, n, up, total, rx, tx, online FROM merged;
+		CREATE TEMP TABLE merged AS SELECT server, t / %[1]d * %[1]d AS t, max(n) AS n, up, total, avg(rx) AS rx, avg(tx) AS tx, online
+			FROM samples WHERE t < %[2]d GROUP BY server, t / %[1]d HAVING count(*) > 1 OR min(t) %% %[1]d <> 0;
+		DELETE FROM samples WHERE t < %[2]d AND (server, t / %[1]d * %[1]d) IN (SELECT server, t FROM merged);
+		INSERT INTO samples (server, t, n, up, total, rx, tx, online) SELECT server, t, n, up, total, rx, tx, online FROM merged;
 		DROP TABLE merged;`, step, cut))
 	if err != nil {
 		return err
@@ -625,7 +686,7 @@ func backup(dir string, now time.Time) (string, error) {
 }
 
 // knownDevices returns the stored device of each open session, keyed by
-// instance|cid|started: an agent restart forgets devices until the next
+// <server>/<instance>|cid|started: an agent restart forgets devices until the next
 // renegotiation (up to an hour), the history does not.
 func (s *store) knownDevices() (map[string]mgmt.Device, error) {
 	rows, err := s.db.Query("SELECT instance, cid, started, device FROM sessions INDEXED BY sessions_open WHERE open = 1 AND device <> ''")

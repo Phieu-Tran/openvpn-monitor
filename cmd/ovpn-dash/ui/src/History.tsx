@@ -3,16 +3,17 @@ import { Button, Card, DateField, DateRangePicker, Pagination, RangeCalendar } f
 import { useEffect, useState } from "react";
 import { F, PRESETS, TZ, addr, appName, bytes, countryName, duration, platName, rangeKey, rangeMs, rangeParams, rate, relative, useDebounced, useJSON, usePref } from "./lib";
 import type { DeviceUse, Facets, History, Preset, Range, SessionRecord, UserRow, Users } from "./lib";
-import { Badge, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, Toggle, profileColor } from "./ui";
+import { Badge, CountryTag, DataTable, DeviceIcon, DeviceTag, Icon, Panel, Picker, ProfileTag, Search, Segmented, ServerTag, Toggle, profileColor } from "./ui";
 import type { Col, Sort } from "./ui";
 
-export interface Filters { range: Range; q: string; profile: string; proto: string; country: string; plat: string; alerts: boolean }
+// server is chosen in the bar above every view, not in the filter bar.
+export interface Filters { range: Range; q: string; server: string; profile: string; proto: string; country: string; plat: string; alerts: boolean }
 
 const PAGE = 50;
 
 function params(f: Filters, extra: Record<string, string> = {}) {
   const p = rangeParams(f.range);
-  for (const [k, v] of Object.entries({ q: f.q, profile: f.profile, proto: f.proto, country: f.country, plat: f.plat, alerts: f.alerts ? "1" : "", ...extra })) {
+  for (const [k, v] of Object.entries({ q: f.q, server: f.server, profile: f.profile, proto: f.proto, country: f.country, plat: f.plat, alerts: f.alerts ? "1" : "", ...extra })) {
     if (v) p.set(k, v);
   }
   return p;
@@ -104,7 +105,7 @@ function Pager({ page, total, onPage }: { page: number; total: number; onPage: (
 function usePaged<T>(path: string, filters: Filters, sort: Sort) {
   const q = useDebounced(filters.q.trim());
   const f = { ...filters, q };
-  const base = JSON.stringify([rangeKey(f.range), q, f.profile, f.proto, f.country, f.plat, f.alerts, sort]);
+  const base = JSON.stringify([rangeKey(f.range), q, f.server, f.profile, f.proto, f.country, f.plat, f.alerts, sort]);
   const [page, setPage] = useState({ base, n: 0 });
   const n = page.base === base ? page.n : 0; // new filters start at the first page
   useEffect(() => { if (page.base !== base) setPage({ base, n: 0 }); }, [base, page.base]);
@@ -140,9 +141,9 @@ function Devices({ list, plat, loading, onPlat }: { list?: DeviceUse[]; plat: st
   );
 }
 
-interface PageProps { filters: Filters; setFilters: (f: Filters) => void; facets?: Facets; alertRate: number; onUser: (cn: string) => void; profiles: string[] }
+interface PageProps { filters: Filters; setFilters: (f: Filters) => void; facets?: Facets; alertRate: number; onUser: (cn: string) => void; profiles: string[]; multi: boolean }
 
-export function Sessions({ filters, setFilters, facets, alertRate, onUser, profiles }: PageProps) {
+export function Sessions({ filters, setFilters, facets, alertRate, onUser, profiles, multi }: PageProps) {
   const [sort, setSort] = usePref<Sort>("sort.history", { k: "start", dir: -1 });
   const r = usePaged<History>("api/history", filters, sort);
   const s = r.data?.summary;
@@ -154,6 +155,7 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
         <span className="font-semibold">{x.cn}</span>
         {alerting(x) && <Badge tone="danger" title={`peak rate ${rate(x.peak_rate!)} > ${rate(alertRate)}`}>⚠ peak</Badge>}
       </span>) },
+    ...(multi ? [{ id: "server", label: "Server", cell: (x: SessionRecord) => <ServerTag name={x.server} /> }] : []),
     { id: "profile", label: "Profile", cell: (x) => <ProfileTag name={x.profile} profiles={profiles} /> },
     { id: "proto", label: "Proto", cell: (x) => x.proto.toUpperCase() },
     { id: "real", label: "Real IP", cell: (x) => <><CountryTag cc={x.country} /><span className="mono">{addr(x.real_ip, x.real_port)}</span></> },
@@ -181,7 +183,7 @@ export function Sessions({ filters, setFilters, facets, alertRate, onUser, profi
   );
 }
 
-export function UserList({ filters, setFilters, facets, alertRate, onUser, profiles }: PageProps) {
+export function UserList({ filters, setFilters, facets, alertRate, onUser, profiles, multi }: PageProps) {
   const [sort, setSort] = usePref<Sort>("sort.users", { k: "last", dir: -1 });
   const r = usePaged<Users>("api/users", filters, sort);
   const s = r.data?.summary;
@@ -192,6 +194,7 @@ export function UserList({ filters, setFilters, facets, alertRate, onUser, profi
         <span className="font-semibold">{u.cn}</span>
         {alerting(u) && <Badge tone="danger" title={`peak rate ${rate(u.peak_rate)} > ${rate(alertRate)}`}>⚠ peak</Badge>}
       </span>) },
+    ...(multi ? [{ id: "servers", label: "Servers", cell: (u: UserRow) => <span className="flex gap-1">{u.servers.map((s) => <ServerTag key={s} name={s} />)}</span> }] : []),
     { id: "profiles", label: "Profiles", cell: (u) => <span className="flex gap-1">{u.profiles.map((p) => <ProfileTag key={p} name={p} profiles={profiles} />)}</span> },
     { id: "n", label: "Sessions", num: true, cell: (u) => u.sessions },
     { id: "time", label: "Time online", num: true, cell: (u) => duration(u.online_seconds) },

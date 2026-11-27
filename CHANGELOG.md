@@ -4,6 +4,27 @@ Versions apply to both images, `ovpn-agent` and `ovpn-dash`. Upgrade: load the n
 change the version on the `image:` line of each host's `docker-compose.yml`,
 `docker compose up -d` (see README, Upgrade).
 
+## 0.1.5 - 2026-11-27
+
+### Added
+
+- Several OpenVPN hosts in one dash: one `ovpn-agent` per host, and
+  `OVPN_AGENT=name=url,name=url` on the dash (e.g.
+  `vpn-a=http://<vpn-host-1>:9177,vpn-b=http://<vpn-host-2>:9177`). All agents share the
+  dash's `data/agent.token`. A server bar above every view picks all servers or one; Online
+  groups the instances by server (agent status, instances up, online, rate) and charts online
+  sessions by server; tables get a Server column, the CSV files a `server`/`servers` column.
+- A server whose agent does not answer is shown red with its last known sessions (greyed);
+  the others keep working and recording. `/api/status` lists `agents`; the dash metrics carry
+  a `server` label.
+
+### Upgrade
+
+- The history so far becomes the first server's in `OVPN_AGENT`, once, on the first start:
+  put the existing OpenVPN host first and pick the names before upgrading. A name is stored
+  with every session; renaming a server later splits its history.
+- `/api/status`: `agent` is now `agents` (a list).
+
 ## 0.1.4 - 2026-11-27
 
 ### Added

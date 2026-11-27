@@ -44,6 +44,35 @@ export function ProfileTabs({ profiles, counts, value, onChange }: {
   );
 }
 
+// ServerTag names the OpenVPN host (agent) a row belongs to.
+export const ServerTag = ({ name }: { name: string }) => (
+  <span className="inline-flex items-center gap-1 rounded-md bg-default px-1.5 py-px text-xs font-medium whitespace-nowrap" title={`Server ${name}`}>
+    <Icon name="server" className="size-3.5 text-muted" />{name}
+  </span>
+);
+
+// ServerSwitch: "" = all servers, else one; a dot per agent (green answers, red not), online counts.
+export function ServerSwitch({ servers, value, onChange }: {
+  servers: { name: string; ok?: boolean; error?: string; online?: number }[]; value: string; onChange: (s: string) => void;
+}) {
+  const total = servers.reduce((a, s) => a + (s.online ?? 0), 0);
+  const pill = (id: string, label: ReactNode, n: number | undefined, dot?: boolean, title?: string) => (
+    <button key={id || "*"} type="button" aria-pressed={value === id} onClick={() => onChange(id)} title={title}
+      className={`flex cursor-pointer items-center gap-2 rounded-full border px-3 py-1 text-sm font-medium whitespace-nowrap transition-colors ${value === id ? "border-accent bg-accent-soft text-accent-soft-foreground" : "border-border text-muted hover:text-foreground"}`}>
+      {dot !== undefined && <i className={`size-2 rounded-full ${dot ? "bg-success" : "bg-danger"}`} />}
+      {label}
+      {n !== undefined && <span className="num rounded-full bg-default px-1.5 text-xs">{n}</span>}
+    </button>
+  );
+  return (
+    <div role="group" aria-label="Server" className="flex items-center gap-2 overflow-x-auto">
+      <Icon name="server" className="size-4 text-muted" />
+      {pill("", "All servers", total)}
+      {servers.map((s) => pill(s.name, s.name, s.online, s.ok, s.ok === false ? `agent ${s.name}: ${s.error ?? "not answering"}` : `agent ${s.name}`))}
+    </div>
+  );
+}
+
 export function Panel({ title, actions, children, flush }: { title?: ReactNode; actions?: ReactNode; children: ReactNode; flush?: boolean }) {
   return (
     <Card className={`min-w-0 gap-3 ${flush ? "px-0 pb-2" : ""}`}>

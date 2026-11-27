@@ -6,7 +6,7 @@ import type { Filters } from "./History";
 import { Online } from "./Online";
 import { F, PRESETS, bytes, rate, useHash, useJSON, usePref } from "./lib";
 import type { Facets, Live, LiveRow, Preset, Status } from "./lib";
-import { Icon } from "./ui";
+import { Icon, ServerSwitch } from "./ui";
 
 const VIEWS = [
   { id: "online", label: "Online", icon: "online" },
@@ -55,8 +55,13 @@ export function App() {
 
   const [preset, setPreset] = usePref<Preset>("hpreset", "7d");
   const [filters, setFilterState] = useState<Filters>(() => ({
-    range: { preset: preset in PRESETS ? preset : "7d" }, q: query.get("q") ?? "", profile: "", proto: "", country: "", plat: "", alerts: false,
+    range: { preset: preset in PRESETS ? preset : "7d" }, q: query.get("q") ?? "", server: "", profile: "", proto: "", country: "", plat: "", alerts: false,
   }));
+  // One agent per OpenVPN host. The configured ones first, then names only the history knows.
+  const [saved, setServer] = usePref("server", "");
+  const servers = [...new Set([...(status.data?.agents.map((a) => a.name) ?? []), ...(live.data?.servers.map((s) => s.name) ?? []), ...(facets.data?.servers ?? [])])];
+  const multi = servers.length > 1;
+  const server = multi && servers.includes(saved) ? saved : "";
   const setFilters = (f: Filters) => { setFilterState(f); if ("preset" in f.range) setPreset(f.range.preset); };
   // links like #history?q=name set the search box
   const linked = query.get("q");
@@ -79,10 +84,12 @@ export function App() {
     return () => removeEventListener("keydown", key);
   }, []);
 
-  const rows: LiveRow[] = (live.data?.instances ?? []).flatMap((i) => i.sessions.map((s) => ({ ...s, instance: i.name, proto: i.proto, profile: i.profile })));
+  const rows: LiveRow[] = (live.data?.instances ?? []).flatMap((i) => i.sessions.map((s) => ({ ...s, server: i.server, instance: i.name, proto: i.proto, profile: i.profile })));
+  const shown = server ? rows.filter((r) => r.server === server) : rows;
   // a profile keeps its chart colour: the position in this sorted list of all known profiles
   const profiles = [...new Set([...(facets.data?.profiles ?? []), ...(live.data?.instances.map((i) => i.profile) ?? [])])].sort();
-  const same = (a: LiveRow, b: LiveRow) => a.instance === b.instance && a.cid === b.cid && a.connected_since === b.connected_since;
+  const same = (a: LiveRow, b: LiveRow) => a.server === b.server && a.instance === b.instance && a.cid === b.cid && a.connected_since === b.connected_since;
+  const down = live.data?.servers.filter((s) => !s.ok) ?? [];
   const current = session && rows.find((r) => same(r, session));
 
   const st = status.data?.store;
@@ -90,20 +97,25 @@ export function App() {
   const banners: { tone: "danger" | "warning"; text: string }[] = [];
   if (st && st.write_errors > 0) banners.push({ tone: "danger", text: `History is not being saved (${st.write_errors} write errors): check the data/ folder ownership (uid 65532) and free disk space on the dash host.` });
   if (status.error) banners.push({ tone: "danger", text: `The dashboard server does not answer: ${status.error}` });
+  if (!live.error && view === "online") {
+    for (const s of down) banners.push({ tone: "danger", text: `Agent ${s.name} does not answer: ${s.error}` + (s.last_ok ? ` — its sessions are as of ${F.abs.format(Date.parse(s.last_ok))}` : "") });
+  }
   if (live.error && view === "online") banners.push({ tone: "danger", text: live.error + (live.data ? ` — showing data from ${F.abs.format(Date.parse(live.data.generated_at))}` : "") });
   if (st?.trimmed) banners.push({ tone: "warning", text: `History was trimmed to stay under ${bytes(st.max_bytes)}: the oldest data is from ${st.oldest ? F.abs.format(Date.parse(st.oldest)) : "–"}.` });
 
-  const agentText = live.error ? (live.error.includes("401") ? "Agent: bad token" : "Agent unreachable") : live.data ? "Live" : "Connecting…";
+  const agentText = live.error ? (live.error.includes("401") && !multi ? "Agent: bad token" : multi ? "Agents unreachable" : "Agent unreachable")
+    : !live.data ? "Connecting…" : down.length ? `${down.length} of ${live.data.servers.length} agents down` : "Live";
+  const chip = live.error ? "bg-danger-soft text-danger" : !live.data ? "bg-default text-muted" : down.length ? "bg-warning-soft text-warning" : "bg-success-soft text-success";
   const nav = VIEWS.map((v) => (
     <a key={v.id} href={`#${v.id}`} aria-current={view === v.id ? "page" : undefined} title={v.label}
       className={`relative flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium whitespace-nowrap transition-colors ${view === v.id ? "bg-accent-soft text-accent-soft-foreground" : "text-muted hover:bg-default hover:text-foreground"}`}>
       <Icon name={v.icon} /><span className={narrow ? "md:hidden" : ""}>{v.label}</span>
       {v.id === "online" && live.data && (
-        <span className={`num rounded-full bg-accent px-1.5 text-[11px] leading-5 font-semibold text-accent-foreground ${narrow ? "md:absolute md:top-0.5 md:right-1" : "ml-auto"}`}>{rows.length}</span>
+        <span className={`num rounded-full bg-accent px-1.5 text-[11px] leading-5 font-semibold text-accent-foreground ${narrow ? "md:absolute md:top-0.5 md:right-1" : "ml-auto"}`}>{shown.length}</span>
       )}
     </a>
   ));
-  const props = { filters, setFilters, facets: facets.data, alertRate, onUser: openUser, profiles };
+  const props = { filters: { ...filters, server }, setFilters, facets: facets.data, alertRate, onUser: openUser, profiles, multi };
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -141,8 +153,8 @@ export function App() {
             <kbd className="ml-auto rounded-md border border-border px-1.5 text-[11px] max-sm:hidden">Ctrl K</kbd>
           </button>
           <span title={live.error || `last update ${live.data ? F.abs.format(Date.parse(live.data.generated_at)) : "–"}`}
-            className={`flex shrink-0 items-center gap-2 rounded-full px-2.5 py-1 text-xs font-medium ${live.error ? "bg-danger-soft text-danger" : live.data ? "bg-success-soft text-success" : "bg-default text-muted"}`}>
-            <i className={live.data && !live.error ? "live-dot" : "size-2 rounded-full bg-current"} />
+            className={`flex shrink-0 items-center gap-2 rounded-full px-2.5 py-1 text-xs font-medium ${chip}`}>
+            <i className={live.data && !live.error && !down.length ? "live-dot" : "size-2 rounded-full bg-current"} />
             {agentText}
             {live.data && !live.error && <span className="num font-normal max-sm:hidden">{F.clock.format(Date.parse(live.data.generated_at))}</span>}
           </span>
@@ -151,10 +163,18 @@ export function App() {
           </Button>
         </header>
         <nav aria-label="Views" className="flex gap-1 overflow-x-auto border-b border-border bg-surface px-3 py-1.5 md:hidden">{nav}</nav>
+        {multi && (
+          <div className="border-b border-border bg-surface px-4 py-2">
+            <ServerSwitch value={server} onChange={setServer} servers={servers.map((name) => {
+              const s = live.data?.servers.find((x) => x.name === name);
+              return { name, ok: s?.ok, error: s?.error, online: live.data && s ? rows.filter((r) => r.server === name).length : undefined };
+            })} />
+          </div>
+        )}
 
         <main className="mx-auto grid w-full max-w-[1600px] min-w-0 content-start gap-4 p-4">
           {banners.map((b) => <Banner key={b.text} tone={b.tone}>{b.text}</Banner>)}
-          {view === "online" && <Online live={live.data} error={live.error} alertRate={alertRate} profiles={profiles} onSession={setSession} />}
+          {view === "online" && <Online live={live.data} error={live.error} alertRate={alertRate} profiles={profiles} server={server} multi={multi} onSession={setSession} />}
           {view === "history" && <Sessions {...props} />}
           {view === "users" && <UserList {...props} />}
         </main>
@@ -162,7 +182,7 @@ export function App() {
         <footer className="mx-auto mt-auto w-full max-w-[1600px] px-4 pb-5 text-xs text-muted">
           {status.data && st && [
             `ovpn-dash ${status.data.version}`,
-            `agent ${status.data.agent.version || "?"}`,
+            multi ? `agents ${status.data.agents.map((a) => `${a.name} ${a.version || "?"}`).join(", ")}` : `agent ${status.data.agents[0]?.version || "?"}`,
             `history since ${st.oldest ? F.abs.format(Date.parse(st.oldest)) : "–"}: ${st.sessions.toLocaleString("en-GB")} sessions, ${bytes(st.data_bytes)}, kept ${Math.round(st.retention_days)} days`,
             `alert above ${alertRate ? rate(alertRate) : "off"}`,
             status.data.geoip_ok ? `IP geolocation: ${status.data.geoip} (offline database)` : "GeoIP not installed",
@@ -174,9 +194,9 @@ export function App() {
         </footer>
       </div>
 
-      {session && <SessionDrawer session={current ?? session} online={!!current || !!live.error} onUser={openUser} onClose={() => setSession(undefined)} />}
-      {user && <UserDrawer cn={user} profiles={profiles} onSessions={showSessions} onClose={() => setUser("")} />}
-      {finding && <QuickSearch live={rows} onUser={openUser} onClose={() => setFinding(false)} />}
+      {session && <SessionDrawer session={current ?? session} online={!!current || !!live.error} multi={multi} onUser={openUser} onClose={() => setSession(undefined)} />}
+      {user && <UserDrawer cn={user} profiles={profiles} multi={multi} onSessions={showSessions} onClose={() => setUser("")} />}
+      {finding && <QuickSearch live={rows} multi={multi} onUser={openUser} onClose={() => setFinding(false)} />}
     </div>
   );
 }

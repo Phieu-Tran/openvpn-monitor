@@ -118,7 +118,7 @@ func (a *api) filter(w http.ResponseWriter, r *http.Request) (filter, bool) {
 		limit = 100
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	return filter{from: from, to: to, q: strings.TrimSpace(q.Get("q")), profile: q.Get("profile"), proto: q.Get("proto"),
+	return filter{from: from, to: to, q: strings.TrimSpace(q.Get("q")), server: q.Get("server"), profile: q.Get("profile"), proto: q.Get("proto"),
 		country: q.Get("country"), cn: q.Get("cn"), plat: q.Get("plat"), alerts: q.Get("alerts") == "1", rate: a.alerts.Rate,
 		sort: q.Get("sort"), desc: q.Get("dir") != "asc", limit: min(limit, 500), offset: max(offset, 0)}, ok
 }
@@ -190,7 +190,7 @@ func (a *api) series(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	step, pts, err := a.store.series(r.Context(), from, to, 360)
+	step, pts, err := a.store.series(r.Context(), from, to, r.URL.Query().Get("server"), 360)
 	if check(w, r, err) {
 		writeJSON(w, map[string]any{"from": from, "to": to, "step": step.Seconds(), "points": pts})
 	}
@@ -201,7 +201,7 @@ func (a *api) heatmap(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cells, err := a.store.heatmap(r.Context(), from, to)
+	cells, err := a.store.heatmap(r.Context(), from, to, r.URL.Query().Get("server"))
 	if check(w, r, err) {
 		writeJSON(w, map[string]any{"from": from, "to": to, "cells": cells})
 	}
@@ -294,7 +294,7 @@ func (a *api) historyCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.limit, f.offset = -1, 0
-	exportCSV(w, r, fileName("sessions", f), []string{"cn", "profile", "proto", "country", "real_ip", "real_port", "vpn_ip",
+	exportCSV(w, r, fileName("sessions", f), []string{"cn", "server", "profile", "proto", "country", "real_ip", "real_port", "vpn_ip",
 		"start", "end", "duration_s", "bytes_from_client", "bytes_to_client", "alerts", "device"},
 		func(write func(...string) error) error {
 			now := time.Now()
@@ -303,7 +303,7 @@ func (a *api) historyCSV(w http.ResponseWriter, r *http.Request) {
 				if s.Open {
 					end, until = "online", now
 				}
-				return write(s.CN, s.Profile, s.Proto, s.Country, s.RealIP, strconv.Itoa(s.RealPort), s.VPNIP, csvTime(s.Start), end,
+				return write(s.CN, s.Server, s.Profile, s.Proto, s.Country, s.RealIP, strconv.Itoa(s.RealPort), s.VPNIP, csvTime(s.Start), end,
 					strconv.FormatInt(int64(until.Sub(s.Start).Seconds()), 10), u64(s.BytesRx), u64(s.BytesTx), a.alertText(s.Peak),
 					strings.Join(slices.DeleteFunc([]string{s.Device.Plat, s.Device.PlatVer, s.Device.GUI}, func(v string) bool { return v == "" }), " "))
 			})
@@ -316,7 +316,7 @@ func (a *api) usersCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.limit, f.offset = -1, 0
-	exportCSV(w, r, fileName("users", f), []string{"cn", "profiles", "sessions", "time_online_s", "bytes_from_client",
+	exportCSV(w, r, fileName("users", f), []string{"cn", "servers", "profiles", "sessions", "time_online_s", "bytes_from_client",
 		"bytes_to_client", "countries", "real_ips", "last_seen", "alerts", "platforms"},
 		func(write func(...string) error) error {
 			return a.store.eachUser(r.Context(), f, true, func(u user, _ userTotals) error {
@@ -324,7 +324,7 @@ func (a *api) usersCSV(w http.ResponseWriter, r *http.Request) {
 				if u.Online {
 					last = "online"
 				}
-				return write(u.CN, strings.Join(u.Profiles, " "), strconv.Itoa(u.Sessions), strconv.FormatInt(u.Seconds, 10),
+				return write(u.CN, strings.Join(u.Servers, " "), strings.Join(u.Profiles, " "), strconv.Itoa(u.Sessions), strconv.FormatInt(u.Seconds, 10),
 					u64(u.BytesRx), u64(u.BytesTx), strings.Join(u.Countries, " "), strings.Join(u.IPList, " "), last, a.alertText(u.Peak), strings.Join(u.Plats, " "))
 			})
 		})

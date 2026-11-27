@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { DayBars, Timeline } from "./charts";
 import { F, addr, appName, bytes, countryName, duration, osName, rangeParams, rate, relative, sum, useDebounced, useJSON } from "./lib";
 import type { Device, LiveRow, SessionRecord, UserDetail, Users } from "./lib";
-import { Badge, CopyButton, CountryTag, DeviceIcon, DeviceTag, ProfileTag, Search } from "./ui";
+import { Badge, CopyButton, CountryTag, DeviceIcon, DeviceTag, ProfileTag, Search, ServerTag } from "./ui";
 
 function Sheet({ title, onClose, children }: { title: ReactNode; onClose: () => void; children: ReactNode }) {
   return (
@@ -58,12 +58,13 @@ function DeviceFields({ device: d }: { device?: Device }) {
 
 const NOTE = "Reported by the client app when it connects (OpenVPN peer info), not verified.";
 
-export function SessionDrawer({ session: s, online, onUser, onClose }: { session: LiveRow; online: boolean; onUser: (cn: string) => void; onClose: () => void }) {
+export function SessionDrawer({ session: s, online, multi, onUser, onClose }: { session: LiveRow; online: boolean; multi: boolean; onUser: (cn: string) => void; onClose: () => void }) {
   return (
     <Sheet title={<span className="flex items-center gap-2">{s.cn}{online ? <Badge tone="success">online</Badge> : <Badge tone="default">disconnected</Badge>}</span>} onClose={onClose}>
       <dl className="text-sm">
         <Field label="Common name" copy={s.cn}>{s.cn}</Field>
         {s.username && <Field label="Username">{s.username}</Field>}
+        {multi && <Field label="Server"><ServerTag name={s.server} /></Field>}
         <Field label="Instance">{s.instance}</Field>
         <Field label="VPN IP" copy={s.vpn_ip}><span className="mono">{s.vpn_ip}</span></Field>
         {s.vpn_ip6 && <Field label="VPN IPv6" copy={s.vpn_ip6}><span className="mono">{s.vpn_ip6}</span></Field>}
@@ -84,7 +85,7 @@ export function SessionDrawer({ session: s, online, onUser, onClose }: { session
 
 const end = (x: SessionRecord) => (x.open ? Date.now() : Date.parse(x.end));
 
-export function UserDrawer({ cn, profiles, onSessions, onClose }: { cn: string; profiles: string[]; onSessions: (cn: string) => void; onClose: () => void }) {
+export function UserDrawer({ cn, profiles, multi, onSessions, onClose }: { cn: string; profiles: string[]; multi: boolean; onSessions: (cn: string) => void; onClose: () => void }) {
   const r = useJSON<UserDetail>(`user-${cn}`, detailURL(cn), 30000);
   const d = r.loading ? undefined : r.data;
   const open = d?.sessions.filter((s) => s.open) ?? [];
@@ -99,7 +100,7 @@ export function UserDrawer({ cn, profiles, onSessions, onClose }: { cn: string; 
               {open.map((s) => (
                 <li key={`${s.instance}|${s.cid}`} className="rounded-lg border border-border p-3 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <ProfileTag name={s.profile} profiles={profiles} /><span className="text-xs text-muted">{s.proto.toUpperCase()}</span>
+                    {multi && <ServerTag name={s.server} />}<ProfileTag name={s.profile} profiles={profiles} /><span className="text-xs text-muted">{s.proto.toUpperCase()}</span>
                     <span className="mono">{s.vpn_ip}</span>
                     <span className="ml-auto text-xs text-muted">since {F.dmhm.format(Date.parse(s.start))} · {duration((Date.now() - Date.parse(s.start)) / 1000)}</span>
                   </div>
@@ -114,6 +115,7 @@ export function UserDrawer({ cn, profiles, onSessions, onClose }: { cn: string; 
         )}
         <Section title="Last 30 days">
           <dl className="text-sm">
+            {multi && <Field label="Servers"><span className="flex flex-wrap gap-1">{[...new Set(d.sessions.map((s) => s.server))].sort().map((v) => <ServerTag key={v} name={v} />)}</span></Field>}
             <Field label="Profiles"><span className="flex flex-wrap gap-1">{[...new Set(d.sessions.map((s) => s.profile))].sort().map((p) => <ProfileTag key={p} name={p} profiles={profiles} />)}</span></Field>
             <Field label="Sessions">{d.sessions.length >= 500 ? "500+" : d.sessions.length} · {duration(secs)} online</Field>
             <Field label="Traffic ↑ / ↓">{bytes(sum(d.days, (x) => x.bytes_rx))} / {bytes(sum(d.days, (x) => x.bytes_tx))}</Field>
@@ -146,7 +148,7 @@ export function UserDrawer({ cn, profiles, onSessions, onClose }: { cn: string; 
                 <div className="min-w-0 grow">
                   <div className="num">{F.dmhm.format(Date.parse(s.start))} → {s.open ? <Badge tone="success">online</Badge> : F.hm.format(end(s))}
                     <span className="text-muted"> · {duration((end(s) - Date.parse(s.start)) / 1000)}</span></div>
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted"><ProfileTag name={s.profile} profiles={profiles} />{s.proto.toUpperCase()} · <span><CountryTag cc={s.country} />{s.real_ip}</span></div>
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">{multi && <ServerTag name={s.server} />}<ProfileTag name={s.profile} profiles={profiles} />{s.proto.toUpperCase()} · <span><CountryTag cc={s.country} />{s.real_ip}</span></div>
                 </div>
                 <span className="num text-xs whitespace-nowrap text-muted">↑ {bytes(s.bytes_rx)} / ↓ {bytes(s.bytes_tx)}</span>
               </li>
@@ -175,7 +177,7 @@ export function UserDrawer({ cn, profiles, onSessions, onClose }: { cn: string; 
   );
 }
 
-export function QuickSearch({ live, onUser, onClose }: { live: LiveRow[]; onUser: (cn: string) => void; onClose: () => void }) {
+export function QuickSearch({ live, multi, onUser, onClose }: { live: LiveRow[]; multi: boolean; onUser: (cn: string) => void; onClose: () => void }) {
   const [q, setQ] = useState("");
   const needle = useDebounced(q.trim()).toLowerCase();
   const past = useJSON<Users>(needle ? `find-${needle}` : "",
@@ -183,10 +185,10 @@ export function QuickSearch({ live, onUser, onClose }: { live: LiveRow[]; onUser
   const found = new Map<string, string>(); // cn -> description
   if (needle) {
     for (const s of live) {
-      if ([s.cn, s.vpn_ip, s.real_ip].some((v) => v.toLowerCase().includes(needle))) found.set(s.cn, `online · ${s.profile} · ${s.vpn_ip} · ${s.real_ip}`);
+      if ([s.cn, s.vpn_ip, s.real_ip].some((v) => v.toLowerCase().includes(needle))) found.set(s.cn, `online · ${multi ? s.server + " · " : ""}${s.profile} · ${s.vpn_ip} · ${s.real_ip}`);
     }
     if (!past.loading) {
-      for (const u of past.data?.users ?? []) if (!found.has(u.cn)) found.set(u.cn, `${u.profiles.join(", ")} · seen ${relative(Date.parse(u.last_seen))}`);
+      for (const u of past.data?.users ?? []) if (!found.has(u.cn)) found.set(u.cn, `${multi ? u.servers.join(", ") + " · " : ""}${u.profiles.join(", ")} · seen ${relative(Date.parse(u.last_seen))}`);
     }
   }
   const items = [...found].slice(0, 10);

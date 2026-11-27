@@ -26,7 +26,7 @@ services:
     volumes:
       - sockets:/srv/ovpn
 
-  agent:
+  agent: &agent
     <<: *base
     build: { context: ../.., args: { APP: ovpn-agent, VERSION: lab } }
     image: ovpn-agent:dev
@@ -44,13 +44,30 @@ services:
     ports:
       - "127.0.0.1:9177:9177"
 
+  # A second OpenVPN host: same profiles and instance names, its own sessions.
+  fake-b:
+    <<: *base
+    image: ovpn-fake:lab
+    user: "0:0"
+    command: ["-root", "/srv/ovpn"]
+    depends_on: [fake]
+    volumes:
+      - sockets-b:/srv/ovpn
+
+  agent-b:
+    <<: *agent
+    build: !reset null
+    volumes:
+      - sockets-b:/srv/ovpn:ro
+    ports: !reset []
+
   dash:
     <<: *base
     build: { context: ../.., args: { APP: ovpn-dash, VERSION: lab } }
     image: ovpn-dash:dev
     environment:
       OVPN_LISTEN: ":8080"
-      OVPN_AGENT: http://agent:9177
+      OVPN_AGENT: lab-a=http://agent:9177,lab-b=http://agent-b:9177
       OVPN_TOKEN_FILE: /run/secrets/agent_token
     healthcheck: *health
     read_only: true
@@ -68,4 +85,5 @@ secrets:
 
 volumes:
   sockets: {}
+  sockets-b: {}
   dashdata: {}

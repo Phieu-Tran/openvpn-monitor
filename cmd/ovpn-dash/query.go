@@ -20,6 +20,7 @@ const vnOffset = 7 * 3600
 type filter struct {
 	from, to                       time.Time
 	q, profile, proto, country, cn string
+	server                         string
 	plat                           string // IV_PLAT, or "unknown" for sessions without a device
 	alerts                         bool
 	rate                           float64 // alert threshold in bytes/s; 0 = alerts off
@@ -50,6 +51,7 @@ func (f filter) where(now time.Time) (string, []any) {
 			args = append(args, v)
 		}
 	}
+	eq("server", f.server)
 	eq("profile", f.profile)
 	eq("proto", f.proto)
 	eq("country", f.country)
@@ -104,7 +106,7 @@ func (s *store) eachSession(ctx context.Context, f filter, fn func(record) error
 		args = append(args, f.threshold())
 	}
 	order := orderBy(map[string]string{
-		"cn": "cn COLLATE NOCASE", "profile": "profile", "proto": "proto", "real": "country || real_ip", "vpn": "vpn_ip",
+		"cn": "cn COLLATE NOCASE", "server": "server", "profile": "profile", "proto": "proto", "real": "country || real_ip", "vpn": "vpn_ip",
 		"start": "started", "end": fmt.Sprintf("(CASE WHEN open THEN %d ELSE ended END)", int64(math.MaxInt64)),
 		"dur": seenUntil(now) + " - started", "traffic": "bytes_rx + bytes_tx", "device": "device",
 	}, f.sort, "start", f.desc)
@@ -115,7 +117,7 @@ func (s *store) eachSession(ctx context.Context, f filter, fn func(record) error
 		// the whole history looking for a full page (measured 2.5s vs 20ms at 3M rows).
 		order = "+" + order
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT cn, profile, proto, instance, cid, real_ip, real_port, vpn_ip, started, ended,
+	rows, err := s.db.QueryContext(ctx, `SELECT server, cn, profile, proto, instance, cid, real_ip, real_port, vpn_ip, started, ended,
 		bytes_rx, bytes_tx, peak, open, country, device FROM sessions`+where+" ORDER BY "+order+" LIMIT ? OFFSET ?",
 		append(args, f.limit, f.offset)...)
 	if err != nil {
@@ -126,7 +128,7 @@ func (s *store) eachSession(ctx context.Context, f filter, fn func(record) error
 		var r record
 		var start, end int64
 		var dev string
-		if err := rows.Scan(&r.CN, &r.Profile, &r.Proto, &r.Instance, &r.CID, &r.RealIP, &r.RealPort, &r.VPNIP, &start, &end,
+		if err := rows.Scan(&r.Server, &r.CN, &r.Profile, &r.Proto, &r.Instance, &r.CID, &r.RealIP, &r.RealPort, &r.VPNIP, &start, &end,
 			&r.BytesRx, &r.BytesTx, &r.Peak, &r.Open, &r.Country, &dev); err != nil {
 			return err
 		}
@@ -172,6 +174,7 @@ func (s *store) summary(ctx context.Context, f filter) (h historySummary, err er
 // user is one row of the Users view: a CN summed over the matching sessions.
 type user struct {
 	CN        string    `json:"cn"`
+	Servers   []string  `json:"servers"`
 	Profiles  []string  `json:"profiles"`
 	Sessions  int       `json:"sessions"`
 	Seconds   int64     `json:"online_seconds"`
@@ -215,12 +218,12 @@ func (s *store) eachUser(ctx context.Context, f filter, ipList bool, fn func(use
 	}
 	// GROUP BY +cn below: use the range index, not the one on cn (19s vs 50ms at 3M rows).
 	order := orderBy(map[string]string{
-		"cn": "cn COLLATE NOCASE", "profiles": "profiles", "n": "n", "time": "secs", "traffic": "rx + tx",
+		"cn": "cn COLLATE NOCASE", "servers": "servers", "profiles": "profiles", "n": "n", "time": "secs", "traffic": "rx + tx",
 		"countries": "countries", "ips": "ips", "plats": "plats",
 		"last": fmt.Sprintf("(CASE WHEN online THEN %d ELSE last END)", int64(math.MaxInt64)),
 	}, f.sort, "last", f.desc)
 	rows, err := s.db.QueryContext(ctx, `WITH u AS (
-		SELECT cn, group_concat(DISTINCT profile) AS profiles, count(*) AS n, sum(`+f.inRange(now)+`) AS secs,
+		SELECT cn, group_concat(DISTINCT server) AS servers, group_concat(DISTINCT profile) AS profiles, count(*) AS n, sum(`+f.inRange(now)+`) AS secs,
 			sum(bytes_rx) AS rx, sum(bytes_tx) AS tx, max(peak) AS peak, max(`+seenUntil(now)+`) AS last, max(open) AS online,
 			group_concat(DISTINCT nullif(country, '')) AS countries, count(DISTINCT real_ip) AS ips, `+ips+` AS ip_list,
 			group_concat(DISTINCT nullif(nullif(device, '') ->> 'plat', '')) AS plats
@@ -235,11 +238,12 @@ func (s *store) eachUser(ctx context.Context, f filter, ipList bool, fn func(use
 		var u user
 		var t userTotals
 		var last int64
-		var profiles, countries, list, plats sql.NullString
-		if err := rows.Scan(&u.CN, &profiles, &u.Sessions, &u.Seconds, &u.BytesRx, &u.BytesTx, &u.Peak, &last, &u.Online,
+		var servers, profiles, countries, list, plats sql.NullString
+		if err := rows.Scan(&u.CN, &servers, &profiles, &u.Sessions, &u.Seconds, &u.BytesRx, &u.BytesTx, &u.Peak, &last, &u.Online,
 			&countries, &u.IPs, &list, &plats, &t.Total, &t.Online, &t.Alerts); err != nil {
 			return err
 		}
+		u.Servers = splitList(servers)
 		u.Profiles, u.Countries, u.Plats, u.LastSeen = splitList(profiles), splitList(countries), splitList(plats), time.Unix(last, 0).UTC()
 		if ipList {
 			u.IPList = splitList(list)
@@ -343,20 +347,32 @@ func (s *store) userDetail(ctx context.Context, f filter) (d userDetail, err err
 	return d, days.Err()
 }
 
+// samplesIn sums the samples of one server ("" = all) per poll: t, n, up, total,
+// rx, tx, online = {server: {profile: sessions}}.
+func samplesIn(from, to time.Time, server string) (string, []any) {
+	where, args := "t BETWEEN ? AND ?", []any{from.Unix(), to.Unix()}
+	if server != "" {
+		where, args = where+" AND server = ?", append(args, server)
+	}
+	return `(SELECT t, sum(n) AS n, sum(up) AS up, sum(total) AS total, sum(rx) AS rx, sum(tx) AS tx,
+		json_group_object(server, json(online)) AS online FROM samples WHERE ` + where + ` GROUP BY t)`, args
+}
+
 // series returns samples in [from, to], downsampled to at most limit points:
 // per bucket the sample with the most sessions (peaks survive), rates averaged.
-func (s *store) series(ctx context.Context, from, to time.Time, limit int) (time.Duration, []point, error) {
+func (s *store) series(ctx context.Context, from, to time.Time, server string, limit int) (time.Duration, []point, error) {
 	step := max(sampleEvery, to.Sub(from)/time.Duration(limit)).Truncate(sampleEvery)
 	if from.Before(time.Now().Add(-compactAfter - compactStep)) {
 		step = max(step, compactStep) // older data has no finer resolution
 	}
-	cols := "t, n, up, total, rx, tx, online FROM samples WHERE t BETWEEN ? AND ?"
+	src, args := samplesIn(from, to, server)
+	cols := "t, n, up, total, rx, tx, online FROM " + src
 	if step > sampleEvery {
 		sec := int64(step / time.Second)
 		cols = fmt.Sprintf(`t / %[1]d * %[1]d AS b, max(n), up, total, avg(rx), avg(tx), online
-			FROM samples WHERE t BETWEEN ? AND ? GROUP BY b`, sec)
+			FROM %[2]s GROUP BY b`, sec, src)
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+cols+" ORDER BY 1", from.Unix(), to.Unix())
+	rows, err := s.db.QueryContext(ctx, "SELECT "+cols+" ORDER BY 1", args...)
 	if err != nil {
 		return step, nil, err
 	}
@@ -371,8 +387,18 @@ func (s *store) series(ctx context.Context, from, to time.Time, limit int) (time
 			return step, nil, err
 		}
 		p.T = time.Unix(t, 0).UTC()
-		if err := json.Unmarshal([]byte(online), &p.Online); err != nil {
+		var per map[string]map[string]int
+		if err := json.Unmarshal([]byte(online), &per); err != nil {
 			return step, nil, err
+		}
+		p.Online, p.Servers = map[string]int{}, map[string]int{}
+		for sv, profiles := range per {
+			n := 0
+			for profile, v := range profiles {
+				p.Online[profile] += v
+				n += v
+			}
+			p.Servers[sv] = n
 		}
 		out = append(out, p)
 	}
@@ -387,12 +413,13 @@ type heatCell struct {
 	Max  int     `json:"max"`
 }
 
-func (s *store) heatmap(ctx context.Context, from, to time.Time) ([]heatCell, error) {
+func (s *store) heatmap(ctx context.Context, from, to time.Time, server string) ([]heatCell, error) {
 	// Average per calendar hour first, so per-minute and compacted days weigh the same.
 	// 1970-01-01 was a Thursday (4).
+	src, args := samplesIn(from, to, server)
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT (h / 24 + 4) %% 7, h %% 24, avg(a), max(m) FROM
-		(SELECT (t + %d) / 3600 AS h, avg(n) AS a, max(n) AS m FROM samples WHERE t BETWEEN ? AND ? GROUP BY h)
-		GROUP BY 1, 2 ORDER BY 1, 2`, vnOffset), from.Unix(), to.Unix())
+		(SELECT (t + %d) / 3600 AS h, avg(n) AS a, max(n) AS m FROM %s GROUP BY h)
+		GROUP BY 1, 2 ORDER BY 1, 2`, vnOffset, src), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -410,6 +437,7 @@ func (s *store) heatmap(ctx context.Context, from, to time.Time) ([]heatCell, er
 
 // facets are the values offered by the history filters.
 type facets struct {
+	Servers   []string `json:"servers"`
 	Profiles  []string `json:"profiles"`
 	Countries []string `json:"countries"`
 	Plats     []string `json:"plats"`
@@ -422,14 +450,15 @@ func (s *store) facets(ctx context.Context) (facets, error) {
 	if time.Since(at) < 5*time.Minute {
 		return cached, nil
 	}
-	var p, c, d sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT (SELECT group_concat(DISTINCT profile) FROM sessions),
+	var sv, p, c, d sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT group_concat(DISTINCT server) FROM sessions),
+		(SELECT group_concat(DISTINCT profile) FROM sessions),
 		(SELECT group_concat(DISTINCT nullif(country, '')) FROM sessions),
-		(SELECT group_concat(DISTINCT nullif(device, '') ->> 'plat') FROM sessions)`).Scan(&p, &c, &d)
+		(SELECT group_concat(DISTINCT nullif(device, '') ->> 'plat') FROM sessions)`).Scan(&sv, &p, &c, &d)
 	if err != nil {
 		return facets{}, err
 	}
-	out := facets{Profiles: splitList(p), Countries: splitList(c), Plats: splitList(d)}
+	out := facets{Servers: splitList(sv), Profiles: splitList(p), Countries: splitList(c), Plats: splitList(d)}
 	s.mu.Lock()
 	s.facet, s.facetAt = out, time.Now()
 	s.mu.Unlock()

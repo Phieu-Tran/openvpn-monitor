@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -32,7 +33,7 @@ func main() {
 	// Defaults come from the environment, so `docker compose exec dash /app -check`
 	// sees the same configuration as the running process.
 	listen := flag.String("listen", app.Env("OVPN_LISTEN", "127.0.0.1:8080"), "listen address [$OVPN_LISTEN] (behind Nginx)")
-	agent := flag.String("agent", app.Env("OVPN_AGENT", ""), "ovpn-agent base URL, e.g. http://<OpenVPN host>:9177 (required) [$OVPN_AGENT]")
+	agent := flag.String("agent", app.Env("OVPN_AGENT", ""), "ovpn-agent base URL, e.g. http://<OpenVPN host>:9177, or several as name=url,name=url (required) [$OVPN_AGENT]")
 	tokenFile := flag.String("token-file", app.Env("OVPN_TOKEN_FILE", "/data/agent.token"), "file containing the agent bearer token [$OVPN_TOKEN_FILE]")
 	dataDir := flag.String("data", app.Env("OVPN_DATA", "/data"), "directory for the session history [$OVPN_DATA]")
 	geoPath := flag.String("geoip", app.Env("OVPN_GEOIP", "/data/geoip.mmdb"), "country database, MaxMind format (DB-IP Lite or GeoLite2 .mmdb), optional [$OVPN_GEOIP]")
@@ -45,10 +46,12 @@ func main() {
 	healthcheck := flag.Bool("healthcheck", false, "exit 0 if this dash answers /healthz (Docker HEALTHCHECK)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
-	agentBase := strings.TrimRight(*agent, "/")
 
 	var alerts alertConfig
-	var err error
+	agents, err := parseAgents(*agent)
+	if err != nil {
+		log.Fatalf("OVPN_AGENT: %v", err)
+	}
 	if alerts.Rate, err = parseSize(*alertRate); err != nil {
 		log.Fatalf("alert-rate: %v", err)
 	}
@@ -68,7 +71,7 @@ func main() {
 	case *healthcheck:
 		app.Healthcheck(*listen)
 	case *check:
-		selfCheck(*listen, agentBase, *tokenFile, *dataDir, *geoPath)
+		selfCheck(*listen, agents, *tokenFile, *dataDir, *geoPath)
 	case *doBackup:
 		dest, err := backup(*dataDir, time.Now())
 		if err != nil {
@@ -79,7 +82,7 @@ func main() {
 	}
 
 	log.Printf("ovpn-dash %s", version)
-	if agentBase == "" {
+	if len(agents) == 0 {
 		log.Fatal("OVPN_AGENT is not set: the ovpn-agent base URL, e.g. http://<OpenVPN host>:9177")
 	}
 	token, err := app.ReadToken(*tokenFile)
@@ -87,7 +90,8 @@ func main() {
 		log.Fatal(err)
 	}
 	g := newGeo(*geoPath, builtinGeoIP)
-	st, err := openStore(*dataDir, retention, int64(maxBytes), g.country)
+	// History written before servers existed belongs to the first one.
+	st, err := openStore(*dataDir, agents[0].name, retention, int64(maxBytes), g.country)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -101,11 +105,11 @@ func main() {
 	go fill()
 	g.watch(fill)
 	p := &poller{
-		url:    agentBase + "/api/v1/sessions",
-		token:  token,
-		client: &http.Client{Timeout: 4 * time.Second},
-		store:  st,
-		geo:    g,
+		servers: agents,
+		token:   token,
+		client:  &http.Client{Timeout: 4 * time.Second},
+		store:   st,
+		geo:     g,
 	}
 	p.poll()
 	go func() {
@@ -121,18 +125,21 @@ func main() {
 	mux.HandleFunc("GET /api/sessions", p.serve)
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		geoDesc, geoOK := g.status()
-		writeJSON(w, map[string]any{"version": version, "agent": p.status(agentBase), "store": st.status(),
+		writeJSON(w, map[string]any{"version": version, "agents": p.status(), "store": st.status(),
 			"geoip": geoDesc, "geoip_ok": geoOK, "alerts": alerts})
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		io.WriteString(w, metrics(p.status(agentBase), st.status()))
+		io.WriteString(w, metrics(p.status(), st.status()))
 	})
 	(&api{store: st, alerts: alerts}).routes(mux)
 
 	srv := &http.Server{Addr: *listen, Handler: secure(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
-	log.Printf("listening on %s, agent %s", *listen, agentBase)
+	for _, a := range agents {
+		log.Printf("agent %s: %s", a.name, a.base)
+	}
+	log.Printf("listening on %s", *listen)
 	log.Fatal(srv.ListenAndServe())
 }
 
@@ -179,80 +186,148 @@ func parseRetention(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// poller fetches the agent every interval, keeps the last answer for the
-// browser and feeds the history store.
-type poller struct {
-	url, token string
-	client     *http.Client
-	store      *store
-	geo        *geo
+// server is one ovpn-agent, i.e. one OpenVPN host. Its name is stored with every
+// session and chart sample, so it should not change once history exists.
+type server struct {
+	name, base string
 
-	mu           sync.Mutex
-	code         int
-	body         []byte
+	// guarded by poller.mu
+	ok           bool
 	polls, fails uint64
 	lastOK       time.Time
 	lastErr      string
-	agentVersion string
+	version      string
+	last         []agentInstance // last good answer: still shown while the agent is unreachable
+}
+
+// parseAgents reads OVPN_AGENT: "http://a:9177" or "hn=http://a:9177,hcm=http://b:9177".
+// Without a name, the host is the name.
+func parseAgents(s string) ([]*server, error) {
+	var out []*server
+	seen := map[string]bool{}
+	for item := range strings.SplitSeq(s, ",") {
+		if item = strings.TrimSpace(item); item == "" {
+			continue
+		}
+		name, base, ok := strings.Cut(item, "=")
+		if !ok {
+			name, base = "", item
+		}
+		name, base = strings.TrimSpace(name), strings.TrimRight(strings.TrimSpace(base), "/")
+		u, err := url.Parse(base)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("bad agent URL %q: want http://<host>:9177 or name=http://<host>:9177", base)
+		}
+		if name == "" {
+			name = u.Hostname()
+		}
+		if strings.ContainsAny(name, "/ \t") || seen[name] {
+			return nil, fmt.Errorf("agent name %q: must be unique, without spaces or /", name)
+		}
+		seen[name] = true
+		out = append(out, &server{name: name, base: base})
+	}
+	return out, nil
+}
+
+// poller fetches every agent each interval (in parallel), keeps the merged answer
+// for the browser and feeds the history store.
+type poller struct {
+	servers []*server
+	token   string
+	client  *http.Client
+	store   *store
+	geo     *geo
+
+	mu   sync.Mutex
+	code int
+	body []byte
+}
+
+// liveResp is /api/sessions: every server's instances, each tagged with its server.
+type liveResp struct {
+	GeneratedAt time.Time       `json:"generated_at"`
+	Servers     []liveServer    `json:"servers"`
+	Instances   []agentInstance `json:"instances"`
+}
+
+type liveServer struct {
+	Name    string    `json:"name"`
+	OK      bool      `json:"ok"`
+	Error   string    `json:"error,omitempty"`
+	LastOK  time.Time `json:"last_ok,omitzero"`
+	Version string    `json:"agent_version,omitempty"`
 }
 
 func (p *poller) poll() {
 	now := time.Now()
-	status, body := p.fetch()
-	var r agentResp
-	if status == http.StatusOK {
-		if err := json.Unmarshal(body, &r); err != nil {
-			status, body = fail("decoding agent response: " + err.Error())
-		} else {
-			// Add the country of each real IP for the browser, and the stored device
-			// of sessions the agent no longer knows one for.
-			known, err := p.store.knownDevices()
-			if err != nil {
-				log.Printf("stored devices: %v", err)
+	resps := make([]agentResp, len(p.servers))
+	errs := make([]error, len(p.servers))
+	var wg sync.WaitGroup
+	for i, sv := range p.servers {
+		wg.Go(func() { resps[i], errs[i] = p.fetch(sv) })
+	}
+	wg.Wait()
+
+	// Add the country of each real IP for the browser, and the stored device
+	// of sessions the agent no longer knows one for.
+	known, err := p.store.knownDevices()
+	if err != nil {
+		log.Printf("stored devices: %v", err)
+	}
+	var fresh agentResp // only what answered now goes into the history
+	live := liveResp{GeneratedAt: now.UTC(), Servers: []liveServer{}, Instances: []agentInstance{}}
+	var failed []string
+	p.mu.Lock()
+	for i, sv := range p.servers {
+		sv.polls++
+		// Log changes only: an agent that is down would otherwise log every 5s.
+		if err := errs[i]; err != nil {
+			if err.Error() != sv.lastErr {
+				log.Printf("agent %s: %v", sv.name, err)
 			}
-			for i := range r.Instances {
-				in := &r.Instances[i]
-				for j := range in.Sessions {
-					s := &in.Sessions[j]
+			sv.ok, sv.lastErr = false, err.Error()
+			sv.fails++
+			failed = append(failed, sv.name+": "+err.Error())
+		} else {
+			if sv.lastErr != "" {
+				log.Printf("agent %s OK again", sv.name)
+			}
+			r := resps[i]
+			for j := range r.Instances {
+				in := &r.Instances[j]
+				in.Server = sv.name
+				for k := range in.Sessions {
+					s := &in.Sessions[k]
 					s.Country = p.geo.country(s.RealIP)
 					if s.Device.Plat == "" {
-						if d, ok := known[sessionKey(in.Name, s.CID, s.ConnectedSince.Unix())]; ok {
+						if d, ok := known[sessionKey(sv.name+"/"+in.Name, s.CID, s.ConnectedSince.Unix())]; ok {
 							s.Device = d
 						}
 					}
 				}
 			}
-			body, _ = json.Marshal(r)
+			sv.ok, sv.lastErr, sv.lastOK, sv.version, sv.last = true, "", now.UTC(), r.AgentVersion, r.Instances
+			fresh.Instances = append(fresh.Instances, r.Instances...)
 		}
+		live.Servers = append(live.Servers, liveServer{Name: sv.name, OK: sv.ok, Error: sv.lastErr, LastOK: sv.lastOK, Version: sv.version})
+		live.Instances = append(live.Instances, sv.last...)
 	}
-	var e struct{ Error string }
-	if status != http.StatusOK {
-		json.Unmarshal(body, &e)
-	}
-	p.mu.Lock()
-	// Log changes only: an agent that is down would otherwise log every 5s.
-	if e.Error != p.lastErr {
-		if e.Error != "" {
-			log.Print(e.Error)
-		} else {
-			log.Print("agent OK again")
-		}
-	}
-	p.code, p.body = status, body
-	p.polls++
-	if status == http.StatusOK {
-		p.lastOK, p.lastErr, p.agentVersion = now.UTC(), "", r.AgentVersion
+	anyOK := len(failed) < len(p.servers)
+	if anyOK {
+		p.code = http.StatusOK
+		p.body, _ = json.Marshal(live)
 	} else {
-		p.fails++
-		p.lastErr = e.Error
+		p.code, p.body = fail(strings.Join(failed, "; "))
 	}
 	p.mu.Unlock()
-	if status == http.StatusOK {
-		p.store.observe(r, now)
+	if anyOK {
+		p.store.observe(fresh, now)
 	}
 }
 
 type agentStatus struct {
+	Name      string    `json:"name"`
 	URL       string    `json:"url"`
 	OK        bool      `json:"ok"`
 	Error     string    `json:"error,omitempty"`
@@ -262,11 +337,15 @@ type agentStatus struct {
 	PollFails uint64    `json:"poll_fails"`
 }
 
-func (p *poller) status(base string) agentStatus {
+func (p *poller) status() []agentStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return agentStatus{URL: base, OK: p.code == http.StatusOK, Error: p.lastErr, LastOK: p.lastOK,
-		Version: p.agentVersion, Polls: p.polls, PollFails: p.fails}
+	out := []agentStatus{}
+	for _, sv := range p.servers {
+		out = append(out, agentStatus{Name: sv.name, URL: sv.base, OK: sv.ok, Error: sv.lastErr, LastOK: sv.lastOK,
+			Version: sv.version, Polls: sv.polls, PollFails: sv.fails})
+	}
+	return out
 }
 
 func (p *poller) serve(w http.ResponseWriter, r *http.Request) {
@@ -279,24 +358,28 @@ func (p *poller) serve(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-func (p *poller) fetch() (int, []byte) {
-	req, _ := http.NewRequest("GET", p.url, nil)
+func (p *poller) fetch(sv *server) (agentResp, error) {
+	var r agentResp
+	req, _ := http.NewRequest("GET", sv.base+"/api/v1/sessions", nil)
 	req.Header.Set("Authorization", "Bearer "+p.token)
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fail("agent unreachable: " + err.Error())
+		return r, errors.New("agent unreachable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return fail("agent rejected the token (401)")
+		return r, errors.New("agent rejected the token (401)")
 	case resp.StatusCode != http.StatusOK:
-		return fail("agent returned " + resp.Status)
+		return r, errors.New("agent returned " + resp.Status)
 	case err != nil:
-		return fail(fmt.Sprintf("reading agent response: %v", err))
+		return r, fmt.Errorf("reading agent response: %v", err)
 	}
-	return http.StatusOK, body
+	if err := json.Unmarshal(body, &r); err != nil {
+		return r, errors.New("decoding agent response: " + err.Error())
+	}
+	return r, nil
 }
 
 func fail(msg string) (int, []byte) {
@@ -304,22 +387,35 @@ func fail(msg string) (int, []byte) {
 	return http.StatusBadGateway, b
 }
 
-func metrics(a agentStatus, s storeStatus) string {
+func metrics(agents []agentStatus, s storeStatus) string {
 	var b strings.Builder
 	g := func(name, typ, help string, v any) {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n%s %v\n", name, help, name, typ, name, v)
 	}
+	// one line per agent, labelled with its server name
+	per := func(name, typ, help string, v func(agentStatus) any) {
+		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, typ)
+		for _, a := range agents {
+			if x := v(a); x != nil {
+				fmt.Fprintf(&b, "%s{server=%q} %v\n", name, a.Name, x)
+			}
+		}
+	}
 	fmt.Fprintf(&b, "# HELP ovpn_dash_build_info Dash version.\n# TYPE ovpn_dash_build_info gauge\novpn_dash_build_info{version=%q} 1\n", version)
-	up := 0
-	if a.OK {
-		up = 1
-	}
-	g("ovpn_dash_agent_up", "gauge", "Whether the last agent poll succeeded.", up)
-	g("ovpn_dash_agent_polls_total", "counter", "Agent polls since start.", a.Polls)
-	g("ovpn_dash_agent_poll_errors_total", "counter", "Failed agent polls since start.", a.PollFails)
-	if !a.LastOK.IsZero() {
-		g("ovpn_dash_agent_last_success_timestamp_seconds", "gauge", "Last successful agent poll (unix time).", a.LastOK.Unix())
-	}
+	per("ovpn_dash_agent_up", "gauge", "Whether the last agent poll succeeded.", func(a agentStatus) any {
+		if a.OK {
+			return 1
+		}
+		return 0
+	})
+	per("ovpn_dash_agent_polls_total", "counter", "Agent polls since start.", func(a agentStatus) any { return a.Polls })
+	per("ovpn_dash_agent_poll_errors_total", "counter", "Failed agent polls since start.", func(a agentStatus) any { return a.PollFails })
+	per("ovpn_dash_agent_last_success_timestamp_seconds", "gauge", "Last successful agent poll (unix time).", func(a agentStatus) any {
+		if a.LastOK.IsZero() {
+			return nil
+		}
+		return a.LastOK.Unix()
+	})
 	g("ovpn_dash_history_sessions", "gauge", "Closed sessions kept in history.", s.Sessions)
 	g("ovpn_dash_open_sessions", "gauge", "Sessions in progress.", s.Open)
 	g("ovpn_dash_samples", "gauge", "Per-minute chart samples kept.", s.Samples)
@@ -332,7 +428,7 @@ func metrics(a agentStatus, s storeStatus) string {
 
 // selfCheck verifies a fresh install: token, writable data dir, the agent
 // (reachable, accepts the token, all instances up) and this dash's own API.
-func selfCheck(listen, agent, tokenFile, dataDir, geoPath string) {
+func selfCheck(listen string, agents []*server, tokenFile, dataDir, geoPath string) {
 	var c app.Checker
 	fmt.Printf("ovpn-dash %s self-check\n\n", version)
 	var token string
@@ -366,15 +462,49 @@ func selfCheck(listen, agent, tokenFile, dataDir, geoPath string) {
 		f.Close()
 		return "", os.Remove(f.Name())
 	})
-	c.Run("agent "+agent+"/healthz", func() (string, error) {
-		code, _, err := app.Get(agent+"/healthz", "")
+	for _, a := range agents {
+		checkAgent(&c, a, token)
+	}
+	if len(agents) == 0 {
+		c.Run("OVPN_AGENT", func() (string, error) { return "", errors.New("not set") })
+	}
+	base := app.LocalURL(listen)
+	c.Run("dash "+base+"/api/status", func() (string, error) {
+		code, body, err := app.Get(base+"/api/status", "")
+		if err != nil || code != 200 {
+			return "", fmt.Errorf("status %d %v (is the dash container running?)", code, err)
+		}
+		var s struct {
+			Agents []agentStatus `json:"agents"`
+			Store  storeStatus   `json:"store"`
+		}
+		if err := json.Unmarshal(body, &s); err != nil {
+			return "", err
+		}
+		for _, a := range s.Agents {
+			if !a.OK {
+				return "", fmt.Errorf("dash cannot poll agent %s: %s", a.Name, a.Error)
+			}
+		}
+		if s.Store.WriteErrors > 0 {
+			return "", fmt.Errorf("%d history write errors: check data/ ownership (uid 65532)", s.Store.WriteErrors)
+		}
+		return fmt.Sprintf("history %d sessions + %d open, %d samples", s.Store.Sessions, s.Store.Open, s.Store.Samples), nil
+	})
+	c.Exit()
+}
+
+// checkAgent: reachable, accepts the token, all instances up.
+func checkAgent(c *app.Checker, a *server, token string) {
+	c.Run("agent "+a.name+" "+a.base+"/healthz", func() (string, error) {
+		code, _, err := app.Get(a.base+"/healthz", "")
 		if err != nil || code != 200 {
 			return "", fmt.Errorf("status %d %v (firewall? agent running?)", code, err)
 		}
 		return "reachable", nil
 	})
-	c.Run("agent /api/v1/sessions with token", func() (string, error) {
-		code, body, err := app.Get(agent+"/api/v1/sessions", token)
+	c.Run("agent "+a.name+" /api/v1/sessions with token", func() (string, error) {
+		code, body, err := app.Get(a.base+"/api/v1/sessions", token)
 		if err != nil {
 			return "", err
 		}
@@ -400,26 +530,4 @@ func selfCheck(listen, agent, tokenFile, dataDir, geoPath string) {
 		}
 		return fmt.Sprintf("agent %s, %d/%d instances up, %d sessions online", r.AgentVersion, up, len(r.Instances), n), nil
 	})
-	base := app.LocalURL(listen)
-	c.Run("dash "+base+"/api/status", func() (string, error) {
-		code, body, err := app.Get(base+"/api/status", "")
-		if err != nil || code != 200 {
-			return "", fmt.Errorf("status %d %v (is the dash container running?)", code, err)
-		}
-		var s struct {
-			Agent agentStatus `json:"agent"`
-			Store storeStatus `json:"store"`
-		}
-		if err := json.Unmarshal(body, &s); err != nil {
-			return "", err
-		}
-		if !s.Agent.OK {
-			return "", errors.New("dash cannot poll the agent: " + s.Agent.Error)
-		}
-		if s.Store.WriteErrors > 0 {
-			return "", fmt.Errorf("%d history write errors: check data/ ownership (uid 65532)", s.Store.WriteErrors)
-		}
-		return fmt.Sprintf("history %d sessions + %d open, %d samples", s.Store.Sessions, s.Store.Open, s.Store.Samples), nil
-	})
-	c.Exit()
 }

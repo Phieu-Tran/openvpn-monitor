@@ -68,23 +68,23 @@ What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 On any machine with Docker (Git Bash on Windows works):
 
 ```sh
-scripts/release.sh 0.1.4
+scripts/release.sh 0.1.5
 ```
 
 Result in `dist/`:
 
 ```text
-ovpn-agent-0.1.4.image.tar.gz    image vihat/ovpn-agent:0.1.4 (~3 MB)
+ovpn-agent-0.1.5.image.tar.gz    image vihat/ovpn-agent:0.1.5 (~3 MB)
 ovpn-agent/                      docker-compose.yml + .env + data/ -> OpenVPN host
-ovpn-dash-0.1.4.image.tar.gz     image vihat/ovpn-dash:0.1.4 (~10 MB)
+ovpn-dash-0.1.5.image.tar.gz     image vihat/ovpn-dash:0.1.5 (~10 MB)
 ovpn-dash/                       docker-compose.yml + .env + data/ -> monitor host
 SHA256SUMS
 ```
 
 Builds are reproducible (same source + version = same binaries). Node is only needed inside Docker.
 
-With GitHub instead: push the repo, then `git tag v0.1.4 && git push --tags`. The workflow
-publishes `ghcr.io/<owner>/ovpn-agent:0.1.4` and `ghcr.io/<owner>/ovpn-dash:0.1.4`; on the hosts,
+With GitHub instead: push the repo, then `git tag v0.1.5 && git push --tags`. The workflow
+publishes `ghcr.io/<owner>/ovpn-agent:0.1.5` and `ghcr.io/<owner>/ovpn-dash:0.1.5`; on the hosts,
 set that name on the `image:` line and use `docker compose pull` instead of `docker load`.
 
 ## Lab
@@ -153,10 +153,10 @@ variable per OpenVPN profile. `scripts/release.sh` puts both files into `dist/`.
 ### 1. Monitor host (dash), first
 
 ```sh
-docker load -i /tmp/ovpn-dash-0.1.4.image.tar.gz && rm /tmp/ovpn-dash-0.1.4.image.tar.gz
+docker load -i /tmp/ovpn-dash-0.1.5.image.tar.gz && rm /tmp/ovpn-dash-0.1.5.image.tar.gz
 ss -ltn | grep ':9178 '                 # nothing: port is free
 cd /opt/ovpn-dash
-grep OVPN_AGENT .env                    # http://<vpn-host>:9177
+grep OVPN_AGENT .env                    # http://<vpn-host>:9177, or name=url,name=url (see "Several OpenVPN hosts")
 openssl rand -hex 32 > data/agent.token # the shared token; copied to the agent host below
 chown -R 65532:65532 data && chmod 750 data && chmod 600 data/agent.token
 docker compose up -d
@@ -185,7 +185,7 @@ and basic auth. The page loads and shows "agent unreachable".
 ### 2. OpenVPN host (agent + iptables)
 
 ```sh
-docker load -i /tmp/ovpn-agent-0.1.4.image.tar.gz && rm /tmp/ovpn-agent-0.1.4.image.tar.gz
+docker load -i /tmp/ovpn-agent-0.1.5.image.tar.gz && rm /tmp/ovpn-agent-0.1.5.image.tar.gz
 ls -ldn <profile-dir>/data/run          # drwx------ 0 0: hence user "0:0" (no capabilities)
 cd /opt/ovpn-agent
 cat .env                                # OVPN_LISTEN=<vpn-host>:9177, one OVPN_RUN_* per profile
@@ -258,6 +258,26 @@ History written by earlier builds (`history.jsonl`, `samples.jsonl`, `open.json`
 `data/ovpn-dash.db` on the first start and the files are renamed to `*.imported`; delete those
 once you are satisfied.
 
+### Several OpenVPN hosts
+
+One dash shows several OpenVPN hosts: put an `ovpn-agent` on each (section 2, same
+`data/agent.token` as the dash; the iptables rule allows the monitor host on each) and list
+them all, by name, on the dash:
+
+```sh
+# /opt/ovpn-dash/.env
+OVPN_AGENT=vpn-2=http://<vpn-host-1>:9177,vpn-4=http://<vpn-host-2>:9177
+docker compose up -d && docker compose exec dash /app -check   # one OK pair per agent
+```
+
+- The name (letters, digits, `-`; no spaces or `/`) is stored with every session and chart
+  sample: pick it once. Renaming later splits that server's history in two.
+- Upgrading from 0.1.4 or older: the existing history becomes the **first** server's, once,
+  on the first start. Keep the host you already monitor first.
+- The bar above every view picks all servers or one. A server whose agent does not answer
+  shows red with its last known sessions greyed; the others keep working and recording, and
+  its sessions stay open until it answers again (no fake disconnects).
+
 ### History: size, retention, backup
 
 - Samples older than 48 hours are merged to one per 10 minutes (peaks survive).
@@ -304,8 +324,8 @@ ls -ldn data/run && ls -ln data/run/           # drwx------ 0 0; mgmt-{udp,tcp}.
 # connect test1 to UDP and test2 to TCP from a laptop/phone
 
 # 3. On <VM>: the release folders from dist/ (both on the VM)
-docker load -i /tmp/ovpn-agent-0.1.4.image.tar.gz
-docker load -i /tmp/ovpn-dash-0.1.4.image.tar.gz
+docker load -i /tmp/ovpn-agent-0.1.5.image.tar.gz
+docker load -i /tmp/ovpn-dash-0.1.5.image.tar.gz
 cd /opt/ovpn-agent
 vi docker-compose.yml   # keep one volume line: ${OVPN_RUN_TEST}:/srv/ovpn/test:ro
 printf 'OVPN_LISTEN=<VM>:9177\nOVPN_RUN_TEST=/srv/openvpn-test/data/run\n' > .env
@@ -324,7 +344,7 @@ Checks on `<VM>`:
 - `cat /srv/openvpn-test/data/state/status-udp.log`: same CN, real address, connected since.
 - Restart one OpenVPN container: the agent shows it down at most one cycle, then up again.
 - Raw capture for the parser tests (save under `internal/mgmt/testdata/`, CNs and IPs masked):
-  `docker run --rm --network none --user 0:0 -v /srv/openvpn-test/data/run:/s:ro vihat/ovpn-agent:0.1.4 -dump /s/mgmt-udp.sock`
+  `docker run --rm --network none --user 0:0 -v /srv/openvpn-test/data/run:/s:ro vihat/ovpn-agent:0.1.5 -dump /s/mgmt-udp.sock`
 
 Cleanup: `docker compose down` in `/opt/ovpn-agent`, `/opt/ovpn-dash` and `/srv/openvpn-test`.
 
@@ -358,7 +378,7 @@ Every binary also has `-version`, `-check` and `-healthcheck`.
 ovpn-dash (behind Nginx, no token):
 
 - `GET /healthz`: `ok` (Docker healthcheck).
-- `GET /api/status`: versions, agent ok / last success / poll errors, history counts, write errors.
+- `GET /api/status`: versions, per agent (`agents`) ok / last success / poll errors, history counts, write errors.
 - `GET /metrics`: Prometheus text, dash health (see Verify).
 - `GET /api/sessions`: the agent's last answer (refreshed every 5s).
 - `GET /api/history`, `GET /api/users`: one page of the sessions (or per-CN sums) overlapping
